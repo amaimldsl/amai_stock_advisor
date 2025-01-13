@@ -20,37 +20,56 @@ class EnhancedStockAnalysis:
         """Calculate technical indicators using pandas"""
         df = data.copy()
         
+        # Print the column structure for debugging
+        print(f"\nInitial columns structure:")
+        print(f"Column names: {df.columns.values}")
+        print(f"Column type: {type(df.columns)}")
+        
+        # If we have a MultiIndex in columns, get the first level
+        if isinstance(df.columns, pd.MultiIndex):
+            # Use the first level of the MultiIndex
+            print("Converting MultiIndex columns...")
+            close_price = df['Close']
+            high_price = df['High']
+            low_price = df['Low']
+        else:
+            close_price = df['Close']
+            high_price = df['High']
+            low_price = df['Low']
+        
         # Moving averages
-        df['SMA_20'] = df['Close'].rolling(window=20).mean()
-        df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+        df['SMA_20'] = close_price.rolling(window=20).mean()
+        df['EMA_20'] = close_price.ewm(span=20, adjust=False).mean()
         
         # RSI
-        delta = df['Close'].diff()
+        delta = close_price.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
         
         # Bollinger Bands
-        df['BB_middle'] = df['Close'].rolling(window=20).mean()
-        df['BB_upper'] = df['BB_middle'] + 2 * df['Close'].rolling(window=20).std()
-        df['BB_lower'] = df['BB_middle'] - 2 * df['Close'].rolling(window=20).std()
+        middle_band = close_price.rolling(window=20).mean()
+        bb_std = close_price.rolling(window=20).std()
+        df['BB_middle'] = middle_band
+        df['BB_upper'] = middle_band + (2 * bb_std)
+        df['BB_lower'] = middle_band - (2 * bb_std)
         
         # MACD
-        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+        exp1 = close_price.ewm(span=12, adjust=False).mean()
+        exp2 = close_price.ewm(span=26, adjust=False).mean()
         df['MACD'] = exp1 - exp2
         df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
         df['MACD_hist'] = df['MACD'] - df['MACD_signal']
         
         # Stochastic Oscillator
-        low_min = df['Low'].rolling(window=14).min()
-        high_max = df['High'].rolling(window=14).max()
-        df['STOCH_K'] = ((df['Close'] - low_min) / (high_max - low_min)) * 100
+        low_min = low_price.rolling(window=14).min()
+        high_max = high_price.rolling(window=14).max()
+        df['STOCH_K'] = ((close_price - low_min) / (high_max - low_min)) * 100
         df['STOCH_D'] = df['STOCH_K'].rolling(window=3).mean()
         
         return df
-
+    
     def fetch_fundamental_data(self, ticker):
         """Fetch fundamental data using Finnhub API"""
         try:
@@ -67,22 +86,18 @@ class EnhancedStockAnalysis:
             print(f"Error fetching fundamental data for {ticker}: {e}")
             return {}
 
-    def fetch_macro_indicators(self):
-        """Fetch macroeconomic indicators from FRED"""
-        indicators = {
-            'GDP': self.fred.get_series('GDP'),
-            'INFLATION': self.fred.get_series('CPIAUCSL'),
-            'UNEMPLOYMENT': self.fred.get_series('UNRATE'),
-            'INTEREST_RATE': self.fred.get_series('FEDFUNDS')
-        }
-        return pd.DataFrame(indicators).fillna(method='ffill')
-
     def fetch_news_sentiment(self, ticker):
         """Fetch and analyze news sentiment"""
         try:
-            news = self.finnhub_client.company_news(ticker, 
-                _from=datetime.now()-timedelta(days=30),
-                to=datetime.now())
+            # Format dates properly for Finnhub API
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+            
+            news = self.finnhub_client.company_news(
+                ticker,
+                _from=start_date,
+                to=end_date
+            )
             
             sentiments = []
             for article in news:
@@ -99,23 +114,104 @@ class EnhancedStockAnalysis:
 
     def prepare_training_data(self, ticker, data):
         """Prepare data for ML model training"""
-        df = self.calculate_technical_indicators(data)
-        
-        # Add fundamental data
-        fundamental_data = self.fetch_fundamental_data(ticker)
-        for key, value in fundamental_data.items():
-            df[key] = value
+        try:
+            print(f"\nPreparing data for {ticker}")
+            print(f"Initial data columns: {data.columns}")
             
-        # Add sentiment data
-        sentiment_data = self.fetch_news_sentiment(ticker)
-        for key, value in sentiment_data.items():
-            df[key] = value
+            # Calculate technical indicators first
+            df = self.calculate_technical_indicators(data)
             
-        # Add macro indicators
-        macro_data = self.fetch_macro_indicators()
-        df = df.join(macro_data)
-        
-        return df.dropna()
+            # Now flatten the columns if they're multi-level
+            if isinstance(df.columns, pd.MultiIndex):
+                # Keep only the first level of the index for price data
+                # and merge with the single-level technical indicators
+                price_cols = df.loc[:, ['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+                tech_cols = df.loc[:, [col for col in df.columns if col[0] not in ['Open', 'High', 'Low', 'Close', 'Volume']]].copy()
+                
+                # Flatten the technical indicator columns
+                if isinstance(tech_cols.columns, pd.MultiIndex):
+                    tech_cols.columns = tech_cols.columns.get_level_values(0)
+                
+                # Combine price and technical data
+                df = pd.concat([price_cols, tech_cols], axis=1)
+            
+            # Reset index to handle any potential issues
+            df = df.reset_index()
+            df['Date'] = pd.to_datetime(df['Date'])
+            df = df.set_index('Date')
+            
+            # Add fundamental data
+            fundamental_data = self.fetch_fundamental_data(ticker)
+            for key, value in fundamental_data.items():
+                df[key] = value
+            
+            # Add sentiment data
+            sentiment_data = self.fetch_news_sentiment(ticker)
+            for key, value in sentiment_data.items():
+                df[key] = value
+            
+            # Fetch macro indicators
+            macro_data = self.fetch_macro_indicators()
+            
+            # Resample macro data to daily frequency
+            macro_data = macro_data.resample('D').ffill()
+            
+            # Align date ranges
+            start_date = df.index.min()
+            end_date = df.index.max()
+            macro_data = macro_data.loc[start_date:end_date]
+            
+            print(f"\nFinal data structure:")
+            print(f"DF columns: {df.columns.tolist()}")
+            print(f"Macro columns: {macro_data.columns.tolist()}")
+            
+            # Merge the dataframes
+            df = df.merge(macro_data, left_index=True, right_index=True, how='left')
+            
+            # Forward fill any missing values
+            df = df.ffill().dropna()
+            
+            return df
+            
+        except Exception as e:
+            print(f"Detailed error in prepare_training_data for {ticker}:")
+            print(f"Error type: {type(e)}")
+            print(f"Error message: {str(e)}")
+            print(f"Data columns: {data.columns}")
+            raise
+
+    def fetch_macro_indicators(self):
+        """Fetch macroeconomic indicators from FRED"""
+        try:
+            indicators = {
+                'GDP': self.fred.get_series('GDP'),
+                'INFLATION': self.fred.get_series('CPIAUCSL'),
+                'UNEMPLOYMENT': self.fred.get_series('UNRATE'),
+                'INTEREST_RATE': self.fred.get_series('FEDFUNDS')
+            }
+            
+            # Create DataFrame with explicit date handling
+            df = pd.DataFrame(indicators)
+            df = df.reset_index()
+            df.columns = ['Date'] + list(indicators.keys())
+            df['Date'] = pd.to_datetime(df['Date'])
+            df = df.set_index('Date')
+            
+            # Forward fill missing values
+            df = df.ffill()
+            
+            print("\nMacro indicators structure:")
+            print(f"Index type: {type(df.index)}")
+            print(f"Columns: {df.columns.tolist()}")
+            print(f"Sample data shape: {df.shape}")
+            
+            return df
+            
+        except Exception as e:
+            print(f"Error in fetch_macro_indicators:")
+            print(f"Error type: {type(e)}")
+            print(f"Error message: {str(e)}")
+            raise
 
     def train_prediction_model(self, data, prediction_window=30):
         """Train ML model for price prediction"""
@@ -191,12 +287,13 @@ def fetch_all_tickers():
     top_etfs = ['SPY', 'QQQ', 'DIA', 'IWM', 'VTI', 'VEA', 'VWO', 'VTV', 'VUG', 'VOO']
     top_comodities_etfs = ['GLD', 'SLV', 'USO', 'UNG', 'PPLT', 'PALL', 'WEAT', 'CORN', 'DBA', 'DBB', 'DBC', 'DBO', 'DBP']
     
-    return islamic_us_etfs + top_tech + top_etfs + top_comodities_etfs
+    #return islamic_us_etfs + top_tech + top_etfs + top_comodities_etfs
+    return islamic_us_etfs
 
 def main():
     # Initialize API keys (replace with your actual API keys)
     api_keys = {
-        'finnhub': 'Ycu2ha6pr01qh0l7ha4mgcu2ha6pr01qh0l7ha4n0',
+        'finnhub': 'cu2ha6pr01qh0l7ha4mgcu2ha6pr01qh0l7ha4n0',
         'fred': 'cd852e18eff164cf69663b2b638f9d1e'
     }
     
@@ -205,6 +302,7 @@ def main():
     
     # Fetch tickers
     tickers = fetch_all_tickers()
+    
     print(f"Analyzing {len(tickers)} tickers...")
     
     # Generate recommendations
