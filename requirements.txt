@@ -1,0 +1,8 @@
+yfinance
+pandas
+numpy   
+scikit-learn
+requests
+textblob
+finnhub-python
+fredapi
