@@ -434,29 +434,55 @@ class EnhancedStockAnalysis:
             print(f"Error validating data for {ticker}: {e}")
             return False
     
-    def normalize_fundamental_score(self, score, metric_count, is_etf):
-        """Normalize fundamental scores to a reasonable range"""
+    def normalize_fundamental_score(self, fundamental_data, is_etf):
+        """Improved fundamental score normalization"""
         try:
-            if score == 0 or metric_count == 0:
-                return 0
+            if not fundamental_data:
+                return 0, 0
                 
-            # For ETFs, apply log normalization to handle large AUM values
-            if is_etf:
-                normalized = np.log(abs(score) + 1) / metric_count
-                # Cap the maximum value at 1
-                return min(normalized, 1) * (1 if score > 0 else -1)
+            # Define expected ranges for each metric
+            metric_ranges = {
+                'P/E': {'min': 0, 'max': 50, 'weight': 1.5},
+                'EPS': {'min': -10, 'max': 100, 'weight': 2.0},
+                'Debt_Ratio': {'min': 0, 'max': 200, 'weight': -1.0},  # Higher debt is negative
+                'ROE': {'min': -50, 'max': 50, 'weight': 2.0},
+                'Current_Ratio': {'min': 0, 'max': 3, 'weight': 1.0},
+                'Gross_Margin': {'min': 0, 'max': 100, 'weight': 1.5},
+                'Operating_Margin': {'min': -50, 'max': 50, 'weight': 1.5},
+                'Revenue_Growth': {'min': -50, 'max': 100, 'weight': 2.0},
+                'Profit_Margin': {'min': -50, 'max': 50, 'weight': 2.0}
+            }
             
-            # For stocks, normalize based on typical fundamental ratio ranges
-            else:
-                # Assume typical fundamental ratios are in 0-100 range
-                normalized = score / (100 * metric_count)
-                # Cap at [-1, 1] range
-                return max(min(normalized, 1), -1)
+            # Calculate normalized scores for each metric
+            scores = []
+            weights = []
+            for metric, value in fundamental_data.items():
+                if metric in metric_ranges and value is not None:
+                    range_info = metric_ranges[metric]
+                    # Normalize to [-1, 1] range
+                    normalized = (value - range_info['min']) / (range_info['max'] - range_info['min'])
+                    normalized = max(-1, min(1, normalized * 2 - 1))  # Scale to [-1, 1]
+                    scores.append(normalized * range_info['weight'])
+                    weights.append(abs(range_info['weight']))
+            
+            if not scores:
+                return 0, 0
                 
+            # Calculate weighted average
+            total_score = sum(scores)
+            valid_metrics = len(scores)
+            
+            # Normalize final score to [-1, 1] range
+            if total_score == 0:
+                return 0, valid_metrics
+            
+            normalized_score = total_score / sum(weights)
+            return normalized_score, valid_metrics
+            
         except Exception as e:
             print(f"Error in normalize_fundamental_score: {e}")
-            return 0
-    
+            return 0, 0
+            
     def fetch_macro_indicators(self):
         """Fetch macroeconomic indicators from FRED"""
         try:
@@ -528,14 +554,14 @@ class EnhancedStockAnalysis:
             print(f"Available columns: {data.columns}")
             raise
 
-
     def generate_enhanced_recommendations(self, tickers):
-        """Generate recommendations with properly normalized scores"""
+        """Generate recommendations with improved scoring"""
         recommendations = {}
+        detailed_analysis = {}
         
         for ticker in tickers:
             try:
-                # Previous data preparation code...
+                # Fetch and prepare data
                 data = yf.download(ticker, period="1y", interval="1d", progress=False)
                 if data.empty:
                     continue
@@ -543,110 +569,123 @@ class EnhancedStockAnalysis:
                 prepared_data = self.prepare_training_data(ticker, data)
                 if prepared_data.empty:
                     continue
-                    
+                
+                # Get current price and calculate metrics
+                current_price = prepared_data['Close'].iloc[-1]
+                
                 # Calculate expected return
                 model = self.train_prediction_model(prepared_data)
                 latest_data = prepared_data.iloc[-1:]
                 prediction = model.predict(latest_data.drop(['Close'], axis=1))
-                current_price = prepared_data['Close'].iloc[-1]
                 expected_return = (prediction[0] - current_price) / current_price
                 
-                # Get fundamental data and normalize scores
+                # Get fundamental data with improved normalization
                 fundamental_data = self.fetch_fundamental_data(ticker)
                 is_etf = self.is_etf(ticker)
+                normalized_fundamental_score, valid_metrics = self.normalize_fundamental_score(
+                    fundamental_data, is_etf)
                 
-                # Calculate fundamental score
-                fundamental_score = sum(value for value in fundamental_data.values() 
-                                    if value is not None and isinstance(value, (int, float)))
-                valid_fundamentals = len([v for v in fundamental_data.values() 
-                                        if v is not None and isinstance(v, (int, float))])
-                
-                # Normalize fundamental score
-                normalized_fundamental_score = self.normalize_fundamental_score(
-                    fundamental_score, valid_fundamentals, is_etf)
-                
-                # Get sentiment score (already normalized between -1 and 1)
+                # Get sentiment score
                 sentiment_data = self.fetch_news_sentiment(ticker)
                 sentiment_score = sentiment_data.get('avg_sentiment', 0)
                 
-                # Calculate total score with normalized components
+                # Calculate total score with balanced weights
                 total_score = (
                     expected_return * 0.5 + 
                     normalized_fundamental_score * 0.3 + 
                     sentiment_score * 0.2
                 )
                 
-                recommendations[ticker] = total_score
+                # Store detailed analysis
+                detailed_analysis[ticker] = {
+                    'total_score': total_score,
+                    'expected_return': expected_return,
+                    'fundamental_score': normalized_fundamental_score,
+                    'sentiment_score': sentiment_score,
+                    'current_price': current_price,
+                    'metrics_count': valid_metrics
+                }
                 
-                print(f"\nDetailed scoring for {ticker}:")
-                print(f"Expected Return: {expected_return:.4f}")
-                print(f"Fundamental Score: {normalized_fundamental_score:.4f} (from {valid_fundamentals} metrics)")
-                print(f"Sentiment Score: {sentiment_score:.4f}")
-                print(f"Total Score: {total_score:.4f}")
+                recommendations[ticker] = total_score
                 
             except Exception as e:
                 print(f"Error processing {ticker}: {e}")
                 continue
         
-        return recommendations
-    def optimize_portfolio(self, recommendations, risk_tolerance=0.5, include_commodities=True):
+        return recommendations, detailed_analysis
+
+
+
+    def optimize_portfolio(self, recommendations, detailed_analysis, risk_tolerance=0.5):
         """
-        Optimize portfolio with buy/sell recommendations and commodity hedging
+        Optimize portfolio with improved weighting to ensure:
+        1. Top 10 gainers are actually 10 stocks (when available)
+        2. Include commodity weights in total portfolio
+        3. Weights sum to 100%
+        4. Only positive expected returns in gainers
         """
         try:
-            # Sort recommendations by absolute score value to properly identify both positive and negative performers
-            sorted_recs = sorted(recommendations.items(), key=lambda x: abs(x[1]), reverse=True)
+            # Filter for only positive expected returns in gainers
+            gainers = {t: s for t, s in recommendations.items() 
+                    if s > 0 and detailed_analysis[t]['expected_return'] > 0}
+            losers = {t: s for t, s in recommendations.items() 
+                    if detailed_analysis[t]['expected_return'] < 0}
             
-            # Separate positive and negative recommendations
-            buy_recs = [(t, s) for t, s in sorted_recs if s > 0]
-            sell_recs = [(t, s) for t, s in sorted_recs if s < 0]
+            # Sort and get top 10 (or all if less than 10)
+            top_gainers = dict(sorted(gainers.items(), key=lambda x: x[1], reverse=True)[:10])
+            top_losers = dict(sorted(losers.items(), key=lambda x: x[1])[:10])
             
-            # Get top 10 buy recommendations
-            top_buys = {}
-            total_buy_score = sum(score for _, score in buy_recs[:10])
-            if total_buy_score > 0:
-                for ticker, score in buy_recs[:10]:
-                    weight = (score / total_buy_score) * risk_tolerance
-                    top_buys[ticker] = weight
+            # Calculate initial weights
+            total_portfolio_weight = 0.0
+            gainer_weights = {}
+            commodity_weights = {}
             
-            # Get top 10 sell recommendations - ensure we look at negative scores
-            top_sells = {}
-            total_sell_score = sum(abs(score) for _, score in sell_recs[:10])
-            if total_sell_score > 0:
-                for ticker, score in sell_recs[:10]:
-                    weight = (abs(score) / total_sell_score) * (1 - risk_tolerance)
-                    top_sells[ticker] = weight
+            # 1. Calculate gainer weights (70% of portfolio)
+            if top_gainers:
+                total_gain_score = sum(s for s in top_gainers.values())
+                for ticker, score in top_gainers.items():
+                    weight = (score / total_gain_score) * 0.70  # 70% allocation to gainers
+                    gainer_weights[ticker] = {
+                        'weight': weight,
+                        'expected_return': detailed_analysis[ticker]['expected_return'],
+                        'score': score,
+                        'current_price': detailed_analysis[ticker]['current_price']
+                    }
+                    total_portfolio_weight += weight
             
-            # Calculate portfolio metrics
-            buy_tickers = list(top_buys.keys())
-            portfolio_volatility = self.calculate_portfolio_volatility(buy_tickers)
-            market_correlation = self.calculate_market_correlation(buy_tickers)
+            # 2. Calculate commodity weights (20% of portfolio)
+            portfolio_volatility = self.calculate_portfolio_volatility(list(gainer_weights.keys()))
+            market_correlation = self.calculate_market_correlation(list(gainer_weights.keys()))
+            commodity_hedging = self.analyze_commodity_hedging(portfolio_volatility, market_correlation)
             
-            print(f"\nPortfolio Metrics:")
-            print(f"Volatility: {portfolio_volatility:.4f}")
-            print(f"Market Correlation: {market_correlation:.4f}")
+            # Normalize commodity weights to exactly 20%
+            if commodity_hedging:
+                total_commodity_weight = sum(commodity_hedging.values())
+                commodity_target_weight = 0.20  # 20% allocation to commodities
+                commodity_weights = {
+                    k: (v / total_commodity_weight) * commodity_target_weight 
+                    for k, v in commodity_hedging.items()
+                }
+                total_portfolio_weight += commodity_target_weight
             
-            # Enhanced commodity analysis and allocation
-            commodity_allocation = {}
-            if include_commodities:
-                commodity_allocation = self.analyze_commodity_hedging(
-                    portfolio_volatility, 
-                    market_correlation
-                )
+            # 3. Calculate defensive/cash position (remaining 10%)
+            cash_weight = 1.0 - total_portfolio_weight
+            
+            # Verify total weights sum to 100%
+            assert abs(sum(w['weight'] for w in gainer_weights.values()) + 
+                    sum(commodity_weights.values()) + 
+                    cash_weight - 1.0) < 0.0001, "Weights don't sum to 100%"
             
             return {
-                'buy_recommendations': top_buys,
-                'sell_recommendations': top_sells,
-                'commodity_hedging': commodity_allocation
+                'gainers': gainer_weights,
+                'commodities': commodity_weights,
+                'cash_weight': cash_weight
             }
             
         except Exception as e:
             print(f"Error in optimize_portfolio: {e}")
-            return {
-                'buy_recommendations': {},
-                'sell_recommendations': {},
-                'commodity_hedging': {}
-            }
+            return {'gainers': {}, 'commodities': {}, 'cash_weight': 1.0}
+
 
 
     def calculate_portfolio_volatility(self, tickers):
@@ -764,49 +803,13 @@ def fetch_all_tickers():
     top_tech = ['AAPL', 'MSFT', 'AMZN', 'GOOGL', 'TSLA', 'NVDA', 'PYPL', 'ADBE', 'INTC', 'CSCO']
     top_etfs = ['SPY', 'QQQ', 'DIA', 'IWM', 'VTI', 'VEA', 'VWO', 'VTV', 'VUG', 'VOO']
     commodity_etfs = ['GLD', 'SLV', 'USO', 'UNG', 'PPLT', 'PALL', 'WEAT', 'CORN', 'DBA', 'DBB', 'DBC', 'DBO', 'DBP']
+    sample_stocks = ['AAPL', 'TSLA', 'MSFT', 'AMZN', 'GOOGL', 'NVDA']
     
     # Return all categories of tickers
-    return islamic_us_etfs + top_tech + top_etfs + commodity_etfs
+    return sample_stocks
         
 def main():
-    # Initialize API keys (replace with your actual API keys)
-    api_keys = {
-        'finnhub': 'cu2ha6pr01qh0l7ha4mgcu2ha6pr01qh0l7ha4n0',
-        'fred': 'cd852e18eff164cf69663b2b638f9d1e'
-    }
-    
-       # Initialize analyzer
-    analyzer = EnhancedStockAnalysis(api_keys)
-    
-    # Fetch all tickers including commodity ETFs
-    tickers = fetch_all_tickers()
-    
-    print(f"Analyzing {len(tickers)} tickers...")
-    
-    # Generate recommendations
-    recommendations = analyzer.generate_enhanced_recommendations(tickers)
-    
-    # Optimize portfolio with new features
-    portfolio = analyzer.optimize_portfolio(recommendations, risk_tolerance=0.6)
-    
-    # Display results
-    print("\nTop 10 Buy Recommendations:")
-    for ticker, weight in sorted(portfolio['buy_recommendations'].items(), 
-                               key=lambda x: x[1], reverse=True):
-        print(f"{ticker}: {weight:.2%} allocation (Expected gain potential)")
-    
-    print("\nTop 10 Sell Recommendations:")
-    for ticker, weight in sorted(portfolio['sell_recommendations'].items(), 
-                               key=lambda x: x[1], reverse=True):
-        print(f"{ticker}: {weight:.2%} allocation (Risk exposure)")
-    
-    if portfolio['commodity_hedging']:
-        print("\nRecommended Commodity Hedging:")
-        for ticker, weight in portfolio['commodity_hedging'].items():
-            print(f"{ticker}: {weight:.2%} allocation (Risk hedge)")
-
-if __name__ == "__main__":
-    main()    # Initialize API keys (replace with your actual API keys)
+    # Initialize API keys
     api_keys = {
         'finnhub': 'cu2ha6pr01qh0l7ha4mgcu2ha6pr01qh0l7ha4n0',
         'fred': 'cd852e18eff164cf69663b2b638f9d1e'
@@ -814,33 +817,36 @@ if __name__ == "__main__":
     
     # Initialize analyzer
     analyzer = EnhancedStockAnalysis(api_keys)
-    
-    # Fetch all tickers including commodity ETFs
     tickers = fetch_all_tickers()
     
-    print(f"Analyzing {len(tickers)} tickers...")
+    print("Analyzing market data...")
+    recommendations, detailed_analysis = analyzer.generate_enhanced_recommendations(tickers)
     
-    # Generate recommendations
-    recommendations = analyzer.generate_enhanced_recommendations(tickers)
+    portfolio = analyzer.optimize_portfolio(recommendations, detailed_analysis, risk_tolerance=0.6)
     
-    # Optimize portfolio with enhanced features
-    portfolio = analyzer.optimize_portfolio(recommendations, risk_tolerance=0.6, include_commodities=True)
+    print("\nComplete Portfolio Allocation:")
+    print("\nEquity Portion (70% Target):")
+    total_equity = 0
+    for ticker, info in sorted(portfolio['gainers'].items(), 
+                             key=lambda x: x[1]['score'], reverse=True):
+        weight = info['weight']
+        total_equity += weight
+        print(f"{ticker:6} - Weight: {weight:7.2%}, "
+              f"Expected Return: {info['expected_return']:7.2%}, "
+              f"Current Price: ${info['current_price']:8.2f}")
+    print(f"Total Equity Weight: {total_equity:.2%}")
     
-    # Display results
-    print("\nTop Buy Recommendations:")
-    for ticker, weight in sorted(portfolio['buy_recommendations'].items(), 
+    print("\nCommodity Portion (20% Target):")
+    total_commodity = 0
+    for ticker, weight in sorted(portfolio['commodities'].items(), 
                                key=lambda x: x[1], reverse=True):
-        print(f"{ticker}: {weight:.2%} allocation")
+        total_commodity += weight
+        print(f"{ticker:6} - Weight: {weight:7.2%}")
+    print(f"Total Commodity Weight: {total_commodity:.2%}")
     
-    print("\nTop Sell Recommendations:")
-    for ticker, weight in sorted(portfolio['sell_recommendations'].items(), 
-                               key=lambda x: x[1], reverse=True):
-        print(f"{ticker}: {weight:.2%} allocation")
-    
-    print("\nCommodity Hedging Allocation:")
-    for ticker, weight in sorted(portfolio['commodity_hedging'].items(), 
-                               key=lambda x: x[1], reverse=True):
-        print(f"{ticker}: {weight:.2%} allocation")
+    print(f"\nCash/Defensive Position: {portfolio['cash_weight']:.2%}")
+    print(f"Total Portfolio Weight: {(total_equity + total_commodity + portfolio['cash_weight']):.2%}")
+
 
 if __name__ == "__main__":
     main()
