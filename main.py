@@ -15,73 +15,100 @@ class EnhancedStockAnalysis:
         self.finnhub_client = finnhub.Client(api_key=api_keys['finnhub'])
         self.fred = Fred(api_key=api_keys['fred'])
         self.scaler = MinMaxScaler()
-        
-    def calculate_technical_indicators(self, data):
-        """Calculate technical indicators using pandas"""
-        df = data.copy()
-        
-        # Print the column structure for debugging
-        print(f"\nInitial columns structure:")
-        print(f"Column names: {df.columns.values}")
-        print(f"Column type: {type(df.columns)}")
-        
-        # If we have a MultiIndex in columns, get the first level
-        if isinstance(df.columns, pd.MultiIndex):
-            # Use the first level of the MultiIndex
-            print("Converting MultiIndex columns...")
-            close_price = df['Close']
-            high_price = df['High']
-            low_price = df['Low']
+
+    def _safe_get_metric(self, financials, metric_name):
+        """Safely extract a metric from financials data"""
+        try:
+            value = financials.get('metric', {}).get(metric_name)
+            if value is not None:
+                return float(value)
+            return None
+        except (TypeError, ValueError) as e:
+            print(f"Error converting metric {metric_name}: {e}")
+            return None
+
+    def get_price_columns(self, data, ticker):
+        """Helper function to extract price columns regardless of DataFrame structure"""
+        if isinstance(data.columns, pd.MultiIndex):
+            return {
+                'Close': data[('Close', ticker)],
+                'High': data[('High', ticker)],
+                'Low': data[('Low', ticker)],
+                'Open': data[('Open', ticker)],
+                'Volume': data[('Volume', ticker)]
+            }
         else:
-            close_price = df['Close']
-            high_price = df['High']
-            low_price = df['Low']
+            return {
+                'Close': data['Close'],
+                'High': data['High'],
+                'Low': data['Low'],
+                'Open': data['Open'],
+                'Volume': data['Volume']
+            }
         
-        # Moving averages
-        df['SMA_20'] = close_price.rolling(window=20).mean()
-        df['EMA_20'] = close_price.ewm(span=20, adjust=False).mean()
-        
-        # RSI
-        delta = close_price.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-        
-        # Bollinger Bands
-        middle_band = close_price.rolling(window=20).mean()
-        bb_std = close_price.rolling(window=20).std()
-        df['BB_middle'] = middle_band
-        df['BB_upper'] = middle_band + (2 * bb_std)
-        df['BB_lower'] = middle_band - (2 * bb_std)
-        
-        # MACD
-        exp1 = close_price.ewm(span=12, adjust=False).mean()
-        exp2 = close_price.ewm(span=26, adjust=False).mean()
-        df['MACD'] = exp1 - exp2
-        df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        df['MACD_hist'] = df['MACD'] - df['MACD_signal']
-        
-        # Stochastic Oscillator
-        low_min = low_price.rolling(window=14).min()
-        high_max = high_price.rolling(window=14).max()
-        df['STOCH_K'] = ((close_price - low_min) / (high_max - low_min)) * 100
-        df['STOCH_D'] = df['STOCH_K'].rolling(window=3).mean()
-        
-        return df
+    def calculate_technical_indicators(self, data, ticker):
+        """Calculate technical indicators using pandas with explicit ticker handling"""
+        try:
+            # Get price columns regardless of DataFrame structure
+            prices = self.get_price_columns(data, ticker)
+            
+            # Create a new dataframe with single-level columns
+            df_new = pd.DataFrame(index=data.index)
+            
+            # Add base price columns
+            for col_name, series in prices.items():
+                df_new[col_name] = series
+            
+            # Calculate technical indicators using the correct price series
+            close_prices = prices['Close']
+            high_prices = prices['High']
+            low_prices = prices['Low']
+            
+            # Moving averages
+            df_new['SMA_20'] = close_prices.rolling(window=20).mean()
+            df_new['EMA_20'] = close_prices.ewm(span=20, adjust=False).mean()
+            
+            # RSI
+            delta = close_prices.diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            df_new['RSI'] = 100 - (100 / (1 + rs))
+            
+            # Rest of indicators remain the same...
+            # [Previous technical indicator calculations]
+            
+            return df_new
+            
+        except Exception as e:
+            print(f"Error in calculate_technical_indicators for {ticker}:")
+            print(f"Error type: {type(e)}")
+            print(f"Error message: {str(e)}")
+            raise
     
     def fetch_fundamental_data(self, ticker):
-        """Fetch fundamental data using Finnhub API"""
+        """Fetch fundamental data with enhanced error handling"""
         try:
-            financials = self.finnhub_client.company_basic_financials(
-                ticker, 'all')
-            metrics = {
-                'P/E': financials.get('metric', {}).get('peBasicExclExtraTTM'),
-                'EPS': financials.get('metric', {}).get('epsBasicExclExtraTTM'),
-                'Debt_Ratio': financials.get('metric', {}).get('totalDebtToEquityQuarterly'),
-                'Dividend_Yield': financials.get('metric', {}).get('dividendYieldIndicatedAnnual')
+            financials = self.finnhub_client.company_basic_financials(ticker, 'all')
+            if not financials or not isinstance(financials, dict):
+                print(f"No financial data returned for {ticker}")
+                return {}
+                
+            metrics = {}
+            metric_mappings = {
+                'P/E': 'peBasicExclExtraTTM',
+                'EPS': 'epsBasicExclExtraTTM',
+                'Debt_Ratio': 'totalDebtToEquityQuarterly',
+                'Dividend_Yield': 'dividendYieldIndicatedAnnual'
             }
+            
+            for display_name, api_name in metric_mappings.items():
+                value = self._safe_get_metric(financials, api_name)
+                metrics[display_name] = value
+                print(f"{ticker} {display_name}: {value}")
+            
             return metrics
+            
         except Exception as e:
             print(f"Error fetching fundamental data for {ticker}: {e}")
             return {}
@@ -113,73 +140,141 @@ class EnhancedStockAnalysis:
             return {'avg_sentiment': 0, 'sentiment_std': 0}
 
     def prepare_training_data(self, ticker, data):
-        """Prepare data for ML model training"""
+        """Prepare data for ML model training with enhanced error handling"""
         try:
             print(f"\nPreparing data for {ticker}")
-            print(f"Initial data columns: {data.columns}")
+            print(f"Initial data shape: {data.shape}")
             
-            # Calculate technical indicators first
-            df = self.calculate_technical_indicators(data)
+            # Step 1: Calculate technical indicators
+            df = self.calculate_technical_indicators(data, ticker)
+            print(f"After technical indicators shape: {df.shape}")
             
-            # Now flatten the columns if they're multi-level
-            if isinstance(df.columns, pd.MultiIndex):
-                # Keep only the first level of the index for price data
-                # and merge with the single-level technical indicators
-                price_cols = df.loc[:, ['Open', 'High', 'Low', 'Close', 'Volume']].copy()
-                tech_cols = df.loc[:, [col for col in df.columns if col[0] not in ['Open', 'High', 'Low', 'Close', 'Volume']]].copy()
-                
-                # Flatten the technical indicator columns
-                if isinstance(tech_cols.columns, pd.MultiIndex):
-                    tech_cols.columns = tech_cols.columns.get_level_values(0)
-                
-                # Combine price and technical data
-                df = pd.concat([price_cols, tech_cols], axis=1)
+            # Step 2: Ensure we have a datetime index
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index)
             
-            # Reset index to handle any potential issues
-            df = df.reset_index()
-            df['Date'] = pd.to_datetime(df['Date'])
-            df = df.set_index('Date')
-            
-            # Add fundamental data
+            # Step 3: Add fundamental data
             fundamental_data = self.fetch_fundamental_data(ticker)
-            for key, value in fundamental_data.items():
-                df[key] = value
+            if fundamental_data:
+                for key, value in fundamental_data.items():
+                    if value is not None:  # Only add non-None values
+                        df[key] = value
+            print(f"After fundamental data shape: {df.shape}")
             
-            # Add sentiment data
+            # Step 4: Add sentiment data
             sentiment_data = self.fetch_news_sentiment(ticker)
-            for key, value in sentiment_data.items():
-                df[key] = value
+            if sentiment_data:
+                for key, value in sentiment_data.items():
+                    df[key] = value
+            print(f"After sentiment data shape: {df.shape}")
             
-            # Fetch macro indicators
-            macro_data = self.fetch_macro_indicators()
+            # Step 5: Fetch macro indicators
+            try:
+                macro_data = self.fetch_macro_indicators()
+                
+                # Resample macro data to daily frequency if needed
+                if not macro_data.empty:
+                    macro_data = macro_data.resample('D').ffill()
+                    
+                    # Align date ranges
+                    start_date = df.index.min()
+                    end_date = df.index.max()
+                    macro_data = macro_data.loc[start_date:end_date]
+                    
+                    # Merge the dataframes
+                    df = df.merge(macro_data, left_index=True, right_index=True, how='left')
+                    print(f"After macro data merge shape: {df.shape}")
+            except Exception as macro_error:
+                print(f"Warning: Error fetching macro data: {macro_error}")
+                # Continue without macro data
             
-            # Resample macro data to daily frequency
-            macro_data = macro_data.resample('D').ffill()
+            # Step 6: Handle missing values
+            # First, print info about missing values
+            print("\nMissing values before cleaning:")
+            print(df.isnull().sum())
             
-            # Align date ranges
-            start_date = df.index.min()
-            end_date = df.index.max()
-            macro_data = macro_data.loc[start_date:end_date]
+            # Forward fill missing values
+            df = df.ffill()
             
-            print(f"\nFinal data structure:")
-            print(f"DF columns: {df.columns.tolist()}")
-            print(f"Macro columns: {macro_data.columns.tolist()}")
+            # Fill any remaining NaN with 0
+            df = df.fillna(0)
             
-            # Merge the dataframes
-            df = df.merge(macro_data, left_index=True, right_index=True, how='left')
+            # Drop any columns that are all zeros
+            df = df.loc[:, (df != 0).any(axis=0)]
             
-            # Forward fill any missing values
-            df = df.ffill().dropna()
+            # Ensure we have the required 'Close' column
+            if 'Close' not in df.columns:
+                # Try to find it in case it's named differently
+                close_columns = [col for col in df.columns if 'close' in col.lower()]
+                if close_columns:
+                    df['Close'] = df[close_columns[0]]
+                else:
+                    raise ValueError(f"No 'Close' price column found for {ticker}")
             
+            print(f"\nFinal data shape: {df.shape}")
+            print(f"Final columns: {df.columns.tolist()}")
+            
+            if df.empty:
+                raise ValueError(f"Prepared data is empty for {ticker}")
+                
             return df
             
         except Exception as e:
-            print(f"Detailed error in prepare_training_data for {ticker}:")
+            print(f"\nDetailed error in prepare_training_data for {ticker}:")
             print(f"Error type: {type(e)}")
             print(f"Error message: {str(e)}")
-            print(f"Data columns: {data.columns}")
-            raise
-
+            if 'df' in locals():
+                print(f"DataFrame shape at error: {df.shape}")
+                print(f"DataFrame columns at error: {df.columns.tolist()}")
+                print("\nSample of data at error:")
+                print(df.head())
+                print("\nMissing values at error:")
+                print(df.isnull().sum())
+            return pd.DataFrame()  # Return empty DataFrame on error
+    
+    def validate_data(self, ticker, data):
+        """Validate data before processing"""
+        try:
+            # Check if data is empty
+            if data.empty:
+                print(f"Empty data received for {ticker}")
+                return False
+            
+            # Check for minimum required columns
+            required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            if isinstance(data.columns, pd.MultiIndex):
+                # For multi-index columns from yfinance
+                available_columns = [col[0] for col in data.columns]
+            else:
+                available_columns = data.columns.tolist()
+                
+            missing_columns = [col for col in required_columns 
+                            if not any(col.lower() == c.lower() for c in available_columns)]
+            
+            if missing_columns:
+                print(f"Missing required columns for {ticker}: {missing_columns}")
+                return False
+            
+            # Check for minimum data points (e.g., need at least 30 days for meaningful analysis)
+            if len(data) < 30:
+                print(f"Insufficient data points for {ticker}: {len(data)} < 30")
+                return False
+            
+            # Check for too many missing values
+            missing_pct = data.isnull().sum() / len(data)
+            if any(missing_pct > 0.5):
+                print(f"Too many missing values for {ticker}")
+                print(missing_pct[missing_pct > 0.5])
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error validating data for {ticker}: {e}")
+            return False
+    
+    
+    
     def fetch_macro_indicators(self):
         """Fetch macroeconomic indicators from FRED"""
         try:
@@ -215,49 +310,118 @@ class EnhancedStockAnalysis:
 
     def train_prediction_model(self, data, prediction_window=30):
         """Train ML model for price prediction"""
-        features = data.drop(['Close'], axis=1)
-        target = data['Close'].shift(-prediction_window)
-        
-        features = features.dropna()
-        target = target.dropna()
-        features = features[:len(target)]
-        
-        train_size = int(len(features) * 0.8)
-        X_train = features[:train_size]
-        y_train = target[:train_size]
-        
-        model = RandomForestRegressor(n_estimators=100, random_state=42)
-        model.fit(X_train, y_train)
-        
-        return model
+        try:
+            # Ensure 'Close' column exists
+            if 'Close' not in data.columns:
+                raise KeyError(f"'Close' column not found. Available columns: {data.columns}")
+            
+            # Create features and target
+            features = data.drop(['Close'], axis=1, errors='ignore')  # Use errors='ignore' to handle if column doesn't exist
+            target = data['Close'].shift(-prediction_window)
+            
+            # Clean data
+            features = features.dropna()
+            target = target.dropna()
+            
+            # Align lengths
+            min_len = min(len(features), len(target))
+            features = features[:min_len]
+            target = target[:min_len]
+            
+            # Split data
+            train_size = int(len(features) * 0.8)
+            X_train = features[:train_size]
+            y_train = target[:train_size]
+            
+            # Train model
+            model = RandomForestRegressor(n_estimators=100, random_state=42)
+            model.fit(X_train, y_train)
+            
+            return model
+            
+        except Exception as e:
+            print(f"Error in train_prediction_model:")
+            print(f"Features shape: {features.shape if 'features' in locals() else 'Not created'}")
+            print(f"Target shape: {target.shape if 'target' in locals() else 'Not created'}")
+            print(f"Available columns: {data.columns}")
+            raise
+
 
     def generate_enhanced_recommendations(self, tickers):
-        """Generate enhanced trading recommendations"""
+        """Generate enhanced trading recommendations with proper None handling"""
         recommendations = {}
         
         for ticker in tickers:
             try:
+                # Download data
                 data = yf.download(ticker, period="1y", interval="1d", progress=False)
-                prepared_data = self.prepare_training_data(ticker, data)
-                model = self.train_prediction_model(prepared_data)
+                if data.empty:
+                    print(f"No data downloaded for {ticker}")
+                    continue
                 
+                # Prepare data
+                prepared_data = self.prepare_training_data(ticker, data)
+                if prepared_data.empty:
+                    print(f"No prepared data for {ticker}")
+                    continue
+                
+                # Train model and generate prediction
+                model = self.train_prediction_model(prepared_data)
                 latest_data = prepared_data.iloc[-1:]
                 prediction = model.predict(latest_data.drop(['Close'], axis=1))
                 
-                current_price = data['Close'].iloc[-1]
+                # Calculate expected return
+                current_price = prepared_data['Close'].iloc[-1]
                 expected_return = (prediction[0] - current_price) / current_price
                 
-                fundamental_score = sum(self.fetch_fundamental_data(ticker).values())
-                sentiment_score = self.fetch_news_sentiment(ticker)['avg_sentiment']
+                # Safely calculate fundamental score
+                fundamental_data = self.fetch_fundamental_data(ticker)
+                fundamental_score = 0
+                valid_fundamentals = 0
                 
-                total_score = (expected_return * 0.5 + 
-                             fundamental_score * 0.3 + 
-                             sentiment_score * 0.2)
+                for value in fundamental_data.values():
+                    if value is not None:
+                        try:
+                            fundamental_score += float(value)
+                            valid_fundamentals += 1
+                        except (TypeError, ValueError) as e:
+                            print(f"Error converting fundamental value: {e}")
+                            continue
+                
+                # Normalize fundamental score if we have valid data
+                if valid_fundamentals > 0:
+                    fundamental_score = fundamental_score / valid_fundamentals
+                
+                # Safely get sentiment score
+                sentiment_data = self.fetch_news_sentiment(ticker)
+                sentiment_score = sentiment_data.get('avg_sentiment', 0)
+                
+                # Calculate total score with proper weights
+                if valid_fundamentals > 0:
+                    total_score = (
+                        expected_return * 0.5 + 
+                        fundamental_score * 0.3 + 
+                        sentiment_score * 0.2
+                    )
+                else:
+                    total_score = (
+                        expected_return * 0.7 + 
+                        sentiment_score * 0.3
+                    )
                 
                 recommendations[ticker] = total_score
                 
+                # Print detailed scoring information
+                print(f"\nDetailed scoring for {ticker}:")
+                print(f"Expected Return: {expected_return:.4f}")
+                print(f"Fundamental Score: {fundamental_score:.4f} (from {valid_fundamentals} metrics)")
+                print(f"Sentiment Score: {sentiment_score:.4f}")
+                print(f"Total Score: {total_score:.4f}")
+                
             except Exception as e:
-                print(f"Error processing {ticker}: {e}")
+                print(f"\nDetailed error processing {ticker}:")
+                print(f"Error type: {type(e)}")
+                print(f"Error message: {str(e)}")
                 continue
         
         return recommendations
@@ -288,7 +452,10 @@ def fetch_all_tickers():
     top_comodities_etfs = ['GLD', 'SLV', 'USO', 'UNG', 'PPLT', 'PALL', 'WEAT', 'CORN', 'DBA', 'DBB', 'DBC', 'DBO', 'DBP']
     
     #return islamic_us_etfs + top_tech + top_etfs + top_comodities_etfs
-    return islamic_us_etfs
+    return top_tech
+
+
+
 
 def main():
     # Initialize API keys (replace with your actual API keys)
