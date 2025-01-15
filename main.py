@@ -8,34 +8,56 @@ from datetime import datetime, timedelta
 from textblob import TextBlob
 import finnhub
 from fredapi import Fred
+import logging
+import contextlib
+
+import yfinance as yf
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('StockAnalysis')
 
 class EnhancedStockAnalysis:
+    
     def __init__(self, api_keys):
-        """Initialize with API keys and metric mappings"""
+        """Initialize with API keys and configuration"""
+        if not isinstance(api_keys, dict) or not all(k in api_keys for k in ['finnhub', 'fred']):
+            raise ValueError("api_keys must be a dict containing 'finnhub' and 'fred' keys")
+            
         self.finnhub_client = finnhub.Client(api_key=api_keys['finnhub'])
         self.fred = Fred(api_key=api_keys['fred'])
         self.scaler = MinMaxScaler()
+        self.logger = logging.getLogger('StockAnalysis')
         
-        # Define metric mappings as class attribute
-        self.metric_mappings = {
-            'P/E': 'peBasicExclExtraItems',
-            'EPS': 'epsTTM',
-            'Debt_Ratio': 'totalDebtToEquity',
-            'Dividend_Yield': 'dividendYield',
-            'ROE': 'returnOnEquityTTM',
-            'Current_Ratio': 'currentRatio',
-            'Gross_Margin': 'grossMarginTTM',
-            'Operating_Margin': 'operatingMarginTTM'
+        # Configuration
+        self.config = {
+            'data_periods': {
+                'short_term': '1mo',
+                'medium_term': '6mo',
+                'long_term': '1y'
+            },
+            'score_weights': {
+                'technical': 0.4,
+                'fundamental': 0.4,
+                'sentiment': 0.2
+            }
         }
+
+
+    def _get_cached_data(self, key):
+        """Get cached data if valid"""
+        if key in self._cache and self._cache_ttl[key] > datetime.now():
+            return self._cache[key]
+        return None
         
-        # Alternative metrics for fallback
-        self.alternative_metrics = {
-            'EPS': ['eps', 'epsGrowthTTM', 'epsInclExtraItemsTTM'],
-            'P/E': ['peNormalizedAnnual', 'peExclExtraTTM'],
-            'Debt_Ratio': ['debtToAssets', 'longTermDebtToEquity'],
-            'ROE': ['roeTTM', 'roeRfy'],
-            'Current_Ratio': ['quickRatio']
-        }
+    def _set_cached_data(self, key, data):
+        """Cache data with TTL"""
+        self._cache[key] = data
+        self._cache_ttl[key] = datetime.now() + self.CACHE_DURATION
 
     def _safe_get_metric(self, financials, metric_name):
         """Safely extract a metric from financials data with enhanced error handling"""
@@ -59,7 +81,56 @@ class EnhancedStockAnalysis:
         except Exception as e:
             print(f"Error extracting metric {metric_name}: {e}")
             return None
+
+
+    def analyze_market_conditions(self):
+        """Analyze market conditions with improved volatility calculation"""
+        try:
+            spy_data = yf.download('SPY', period=self.config['data_periods']['medium_term'])
+            vix_data = yf.download('^VIX', period=self.config['data_periods']['short_term'])
             
+            # Calculate returns and volatility - use .iloc[0] for proper Series element access
+            returns = spy_data['Close'].pct_change()
+            volatility = float(np.sqrt(252) * returns.rolling(window=21).std().iloc[-1].iloc[0])
+            
+            # Calculate trend strength - use .iloc[0] for proper Series element access
+            sma_20 = spy_data['Close'].rolling(window=20).mean()
+            sma_50 = spy_data['Close'].rolling(window=50).mean()
+            trend_strength = float((sma_20.iloc[-1].iloc[0] / sma_50.iloc[-1].iloc[0]) - 1)
+            
+            # Get VIX level with proper Series element access
+            vix_level = float(vix_data['Close'].iloc[-1].iloc[0])
+            
+            # Calculate market stress
+            market_stress = self._calculate_market_stress(
+                volatility=volatility,
+                vix=vix_level,
+                trend_strength=trend_strength
+            )
+            
+            return {
+                'market_stress': market_stress,
+                'current_volatility': volatility,
+                'vix_level': vix_level,
+                'market_trend': trend_strength * 100  # Convert to percentage
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error in market analysis: {e}")
+            return {
+                'market_stress': 0.5,  # Default to moderate stress
+                'current_volatility': 0.2,
+                'vix_level': 20,
+                'market_trend': 0
+            }
+
+
+
+
+
+
+
+
     def get_price_columns(self, data, ticker):
         """Helper function to extract price columns regardless of DataFrame structure"""
         if isinstance(data.columns, pd.MultiIndex):
@@ -119,118 +190,122 @@ class EnhancedStockAnalysis:
             print(f"Critical error in technical indicators: {e}")
             return pd.DataFrame()
                     
+        
     def fetch_fundamental_data(self, ticker):
-        """Fetch fundamental data with enhanced fallback options and yfinance backup"""
+        """Fetch fundamental data with improved metric extraction"""
         try:
-            print(f"\nFetching fundamental data for {ticker}...")
-            
-            # First check if ticker is an ETF
-            if self.is_etf(ticker):
-                return self.fetch_etf_data(ticker)
-            
-            # Initialize metrics dictionary
             metrics = {}
             
-            # Try Finnhub first
+            # Get data from Finnhub
             financials = self.finnhub_client.company_basic_financials(ticker, 'all')
             
-            # If Finnhub fails or misses metrics, use yfinance as backup
+            # Get data from yfinance as backup
             yf_ticker = yf.Ticker(ticker)
-            info = yf_ticker.info
-            
-            # Enhanced metric mapping with fallbacks
-            metric_sources = {
-                'P/E': [
-                    ('finnhub', 'peBasicExclExtraItems'),
-                    ('finnhub', 'peNormalizedAnnual'),
-                    ('yfinance', 'forwardPE'),
-                    ('yfinance', 'trailingPE')
-                ],
-                'EPS': [
-                    ('finnhub', 'epsTTM'),
-                    ('yfinance', 'trailingEps'),
-                    ('yfinance', 'forwardEps')
-                ],
-                'Debt_Ratio': [
-                    ('finnhub', 'totalDebtToEquity'),
-                    ('finnhub', 'debtToAssets'),
-                    ('yfinance', 'debtToEquity')
-                ],
-                'ROE': [
-                    ('finnhub', 'returnOnEquityTTM'),
-                    ('finnhub', 'roeTTM'),
-                    ('yfinance', 'returnOnEquity')
-                ],
-                'Current_Ratio': [
-                    ('finnhub', 'currentRatio'),
-                    ('finnhub', 'quickRatio'),
-                    ('yfinance', 'currentRatio')
-                ],
-                'Gross_Margin': [
-                    ('finnhub', 'grossMarginTTM'),
-                    ('yfinance', 'grossMargins')
-                ],
-                'Operating_Margin': [
-                    ('finnhub', 'operatingMarginTTM'),
-                    ('yfinance', 'operatingMargins')
-                ],
-                'Revenue_Growth': [
-                    ('finnhub', 'revenueGrowthTTM'),
-                    ('yfinance', 'revenueGrowth')
-                ],
-                'Profit_Margin': [
-                    ('finnhub', 'netProfitMarginTTM'),
-                    ('yfinance', 'profitMargins')
-                ]
-            }
-            
-            # Try to get each metric from multiple sources
-            for metric_name, sources in metric_sources.items():
-                value = None
-                for source, key in sources:
-                    try:
-                        if source == 'finnhub':
-                            if financials and 'metric' in financials:
-                                value = financials['metric'].get(key)
-                        elif source == 'yfinance':
-                            value = info.get(key)
-                            
-                        if value is not None:
-                            try:
-                                value = float(value)
-                                print(f"{ticker} {metric_name}: {value} (from {source})")
-                                metrics[metric_name] = value
-                                break
-                            except (ValueError, TypeError):
-                                continue
-                    except Exception as e:
-                        print(f"Error getting {metric_name} from {source}: {e}")
-                        continue
-                
-                if value is None:
-                    print(f"Metric {metric_name} not found for {ticker}")
-            
-            # Add market cap and volume metrics
             try:
-                if info.get('marketCap'):
-                    metrics['Market_Cap'] = float(info['marketCap'])
-                if info.get('volume'):
-                    metrics['Volume'] = float(info['volume'])
-            except Exception as e:
-                print(f"Error getting market data: {e}")
+                info = yf_ticker.info
+            except:
+                info = {}
+
+            # Metric mapping dictionary
+            metric_mappings = {
+                'P/E': {
+                    'finnhub': 'peBasicExcl',
+                    'yfinance': 'forwardPE',
+                    'fallback': 'trailingPE'
+                },
+                'EPS': {
+                    'finnhub': 'epsBasicExcl',
+                    'yfinance': 'forwardEps',
+                    'fallback': 'trailingEps'
+                },
+                'Debt_Ratio': {
+                    'finnhub': 'totalDebt/totalAssets',
+                    'yfinance': 'debtToEquity'
+                },
+                'ROE': {
+                    'finnhub': 'roeRfy',
+                    'yfinance': 'returnOnEquity'
+                },
+                'Current_Ratio': {
+                    'finnhub': 'currentRatio',
+                    'yfinance': 'currentRatio'
+                },
+                'Gross_Margin': {
+                    'finnhub': 'grossMargin',
+                    'yfinance': 'grossMargins'
+                },
+                'Operating_Margin': {
+                    'finnhub': 'operatingMargin',
+                    'yfinance': 'operatingMargins'
+                },
+                'Revenue_Growth': {
+                    'finnhub': 'revenueGrowth',
+                    'yfinance': 'revenueGrowth'
+                },
+                'Profit_Margin': {
+                    'finnhub': 'netProfitMargin',
+                    'yfinance': 'profitMargins'
+                }
+            }
+
+            # Extract metrics with detailed logging
+            print(f"\nFetching fundamental data for {ticker}:")
             
-            # Calculate additional derived metrics
-            if 'Market_Cap' in metrics and 'Volume' in metrics:
+            for metric_name, sources in metric_mappings.items():
                 try:
-                    metrics['Volume_to_Market_Cap'] = metrics['Volume'] / metrics['Market_Cap']
-                except Exception as e:
-                    print(f"Error calculating derived metrics: {e}")
-            
+                    # Try Finnhub first
+                    if 'finnhub' in sources and 'metric' in financials:
+                        value = financials['metric'].get(sources['finnhub'])
+                        if value is not None:
+                            metrics[metric_name] = float(value)
+                            print(f"{metric_name} (Finnhub): {value}")
+                            continue
+
+                    # Try primary yfinance source
+                    if 'yfinance' in sources and sources['yfinance'] in info:
+                        value = info[sources['yfinance']]
+                        if value is not None:
+                            metrics[metric_name] = float(value)
+                            print(f"{metric_name} (YFinance): {value}")
+                            continue
+
+                    # Try fallback yfinance source if available
+                    if 'fallback' in sources and sources['fallback'] in info:
+                        value = info[sources['fallback']]
+                        if value is not None:
+                            metrics[metric_name] = float(value)
+                            print(f"{metric_name} (YFinance fallback): {value}")
+                            continue
+
+                    print(f"{metric_name}: Not available")
+
+                except (TypeError, ValueError) as e:
+                    print(f"Error processing {metric_name}: {e}")
+                    continue
+
+            # Calculate additional ratios if possible
+            if 'totalDebt' in info and 'totalAssets' in info and 'Debt_Ratio' not in metrics:
+                try:
+                    debt_ratio = float(info['totalDebt']) / float(info['totalAssets'])
+                    metrics['Debt_Ratio'] = debt_ratio
+                    print(f"Debt_Ratio (calculated): {debt_ratio}")
+                except:
+                    pass
+
+            # Log summary of available metrics
+            print(f"\nSummary for {ticker}:")
+            print(f"Found {len(metrics)} metrics out of {len(metric_mappings)} possible metrics")
+            print("Available metrics:", list(metrics.keys()))
+            print("Missing metrics:", set(metric_mappings.keys()) - set(metrics.keys()))
+
             return metrics
-            
+
         except Exception as e:
-            print(f"Error in fetch_fundamental_data for {ticker}: {e}")
-            return {}        
+            print(f"Error fetching fundamental data for {ticker}: {e}")
+            return {}
+
+
+
                     
     def is_etf(self, ticker):
         """Helper function to identify ETFs"""
@@ -300,140 +375,99 @@ class EnhancedStockAnalysis:
             print(f"Error fetching news sentiment for {ticker}: {e}")
             return {'avg_sentiment': 0, 'sentiment_std': 0}
 
+    
+    
+    
+
+    
+    
     def prepare_training_data(self, ticker, data):
-        """Prepare data for ML model training with enhanced error handling"""
+        """Enhanced data preparation with proper MultiIndex handling"""
         try:
             print(f"\nPreparing data for {ticker}")
-            print(f"Initial data shape: {data.shape}")
             
-            # Step 1: Calculate technical indicators
-            df = self.calculate_technical_indicators(data, ticker)
-            print(f"After technical indicators shape: {df.shape}")
+            # Create new DataFrame for processed data
+            processed_data = pd.DataFrame(index=data.index)
             
-            # Step 2: Ensure we have a datetime index
-            if not isinstance(df.index, pd.DatetimeIndex):
-                df.index = pd.to_datetime(df.index)
+            # Extract price data based on column structure
+            if isinstance(data.columns, pd.MultiIndex):
+                for price_type in ['Close', 'Open', 'High', 'Low', 'Volume']:
+                    if (price_type, ticker) in data.columns:
+                        processed_data[price_type] = data[(price_type, ticker)]
+            else:
+                processed_data = data[['Close', 'Open', 'High', 'Low', 'Volume']].copy()
             
-            # Step 3: Add fundamental data
-            fundamental_data = self.fetch_fundamental_data(ticker)
-            if fundamental_data:
-                for key, value in fundamental_data.items():
-                    if value is not None:  # Only add non-None values
-                        df[key] = value
-            print(f"After fundamental data shape: {df.shape}")
-            
-            # Step 4: Add sentiment data
-            sentiment_data = self.fetch_news_sentiment(ticker)
-            if sentiment_data:
-                for key, value in sentiment_data.items():
-                    df[key] = value
-            print(f"After sentiment data shape: {df.shape}")
-            
-            # Step 5: Fetch macro indicators
+            # Calculate technical indicators
             try:
-                macro_data = self.fetch_macro_indicators()
+                processed_data['SMA_20'] = processed_data['Close'].rolling(window=20).mean()
+                processed_data['EMA_20'] = processed_data['Close'].ewm(span=20, adjust=False).mean()
                 
-                # Resample macro data to daily frequency if needed
-                if not macro_data.empty:
-                    macro_data = macro_data.resample('D').ffill()
-                    
-                    # Align date ranges
-                    start_date = df.index.min()
-                    end_date = df.index.max()
-                    macro_data = macro_data.loc[start_date:end_date]
-                    
-                    # Merge the dataframes
-                    df = df.merge(macro_data, left_index=True, right_index=True, how='left')
-                    print(f"After macro data merge shape: {df.shape}")
-            except Exception as macro_error:
-                print(f"Warning: Error fetching macro data: {macro_error}")
-                # Continue without macro data
-            
-            # Step 6: Handle missing values
-            # First, print info about missing values
-            print("\nMissing values before cleaning:")
-            print(df.isnull().sum())
-            
-            # Forward fill missing values
-            df = df.ffill()
-            
-            # Fill any remaining NaN with 0
-            df = df.fillna(0)
-            
-            # Drop any columns that are all zeros
-            df = df.loc[:, (df != 0).any(axis=0)]
-            
-            # Ensure we have the required 'Close' column
-            if 'Close' not in df.columns:
-                # Try to find it in case it's named differently
-                close_columns = [col for col in df.columns if 'close' in col.lower()]
-                if close_columns:
-                    df['Close'] = df[close_columns[0]]
-                else:
-                    raise ValueError(f"No 'Close' price column found for {ticker}")
-            
-            print(f"\nFinal data shape: {df.shape}")
-            print(f"Final columns: {df.columns.tolist()}")
-            
-            if df.empty:
-                raise ValueError(f"Prepared data is empty for {ticker}")
+                # Calculate RSI
+                delta = processed_data['Close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                rs = gain / loss
+                processed_data['RSI'] = 100 - (100 / (1 + rs))
                 
-            return df
+                # Add momentum indicators
+                processed_data['ROC'] = processed_data['Close'].pct_change(periods=20)
+            except Exception as e:
+                print(f"Error calculating technical indicators: {e}")
+            
+            # Clean any NaN values
+            processed_data = processed_data.dropna()
+            
+            print(f"Processed data shape: {processed_data.shape}")
+            return processed_data
             
         except Exception as e:
-            print(f"\nDetailed error in prepare_training_data for {ticker}:")
-            print(f"Error type: {type(e)}")
-            print(f"Error message: {str(e)}")
-            if 'df' in locals():
-                print(f"DataFrame shape at error: {df.shape}")
-                print(f"DataFrame columns at error: {df.columns.tolist()}")
-                print("\nSample of data at error:")
-                print(df.head())
-                print("\nMissing values at error:")
-                print(df.isnull().sum())
-            return pd.DataFrame()  # Return empty DataFrame on error
-    
+            print(f"Error preparing data for {ticker}: {str(e)}")
+            return pd.DataFrame()
+   
+
+
+
     def validate_data(self, ticker, data):
-        """Validate data before processing"""
+        """Validate data with enhanced checks"""
         try:
-            # Check if data is empty
-            if data.empty:
-                print(f"Empty data received for {ticker}")
+            if data is None or data.empty:
+                logger.error(f"Empty data received for {ticker}")
                 return False
-            
-            # Check for minimum required columns
-            required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-            if isinstance(data.columns, pd.MultiIndex):
-                # For multi-index columns from yfinance
-                available_columns = [col[0] for col in data.columns]
-            else:
-                available_columns = data.columns.tolist()
                 
-            missing_columns = [col for col in required_columns 
-                            if not any(col.lower() == c.lower() for c in available_columns)]
+            min_required_points = 30
+            required_columns = ['Close', 'High', 'Low', 'Open', 'Volume']
             
-            if missing_columns:
-                print(f"Missing required columns for {ticker}: {missing_columns}")
+            # Handle both MultiIndex and regular columns
+            if isinstance(data.columns, pd.MultiIndex):
+                ticker_columns = [(col, ticker) for col in required_columns]
+                data_subset = data[ticker_columns] if all(col in data.columns for col in ticker_columns) else None
+            else:
+                data_subset = data[required_columns] if all(col in data.columns for col in required_columns) else None
+                
+            if data_subset is None or data_subset.empty:
+                logger.error(f"Missing required columns for {ticker}")
                 return False
-            
-            # Check for minimum data points (e.g., need at least 30 days for meaningful analysis)
-            if len(data) < 30:
-                print(f"Insufficient data points for {ticker}: {len(data)} < 30")
+                
+            if len(data_subset) < min_required_points:
+                logger.error(f"Insufficient data points for {ticker}: {len(data_subset)} < {min_required_points}")
                 return False
-            
-            # Check for too many missing values
-            missing_pct = data.isnull().sum() / len(data)
-            if any(missing_pct > 0.5):
-                print(f"Too many missing values for {ticker}")
-                print(missing_pct[missing_pct > 0.5])
+                
+            # Check for excessive missing values
+            missing_pct = data_subset.isnull().mean()
+            if any(missing_pct > 0.1):  # More than 10% missing
+                logger.error(f"Too many missing values for {ticker}")
                 return False
-            
+                
             return True
             
         except Exception as e:
-            print(f"Error validating data for {ticker}: {e}")
+            logger.error(f"Error validating data for {ticker}: {e}")
             return False
-    
+
+
+
+
+
     def normalize_fundamental_score(self, fundamental_data, is_etf):
         """Improved fundamental score normalization"""
         try:
@@ -555,136 +589,121 @@ class EnhancedStockAnalysis:
             raise
 
     def generate_enhanced_recommendations(self, tickers):
-        """Generate recommendations with improved scoring"""
+        """Generate recommendations with improved debugging and error handling"""
         recommendations = {}
         detailed_analysis = {}
         
-        for ticker in tickers:
-            try:
-                # Fetch and prepare data
-                data = yf.download(ticker, period="1y", interval="1d", progress=False)
-                if data.empty:
+        print("\nStarting recommendation generation for tickers:", tickers)
+        
+        try:
+            # Download data for all tickers at once
+            print("Downloading data for all tickers...")
+            data = yf.download(tickers, period="1y", interval="1d", progress=False)
+            print(f"Downloaded data shape: {data.shape}")
+            
+            # Process each ticker only once
+            processed_tickers = set()
+            
+            for ticker in tickers:
+                if ticker in processed_tickers:
                     continue
                     
-                prepared_data = self.prepare_training_data(ticker, data)
-                if prepared_data.empty:
-                    continue
-                
-                # Get current price and calculate metrics
-                current_price = prepared_data['Close'].iloc[-1]
-                
-                # Calculate expected return
-                model = self.train_prediction_model(prepared_data)
-                latest_data = prepared_data.iloc[-1:]
-                prediction = model.predict(latest_data.drop(['Close'], axis=1))
-                expected_return = (prediction[0] - current_price) / current_price
-                
-                # Get fundamental data with improved normalization
-                fundamental_data = self.fetch_fundamental_data(ticker)
-                is_etf = self.is_etf(ticker)
-                normalized_fundamental_score, valid_metrics = self.normalize_fundamental_score(
-                    fundamental_data, is_etf)
-                
-                # Get sentiment score
-                sentiment_data = self.fetch_news_sentiment(ticker)
-                sentiment_score = sentiment_data.get('avg_sentiment', 0)
-                
-                # Calculate total score with balanced weights
-                total_score = (
-                    expected_return * 0.5 + 
-                    normalized_fundamental_score * 0.3 + 
-                    sentiment_score * 0.2
-                )
-                
-                # Store detailed analysis
-                detailed_analysis[ticker] = {
-                    'total_score': total_score,
-                    'expected_return': expected_return,
-                    'fundamental_score': normalized_fundamental_score,
-                    'sentiment_score': sentiment_score,
-                    'current_price': current_price,
-                    'metrics_count': valid_metrics
-                }
-                
-                recommendations[ticker] = total_score
-                
-            except Exception as e:
-                print(f"Error processing {ticker}: {e}")
-                continue
-        
-        return recommendations, detailed_analysis
-
-
-
-    def optimize_portfolio(self, recommendations, detailed_analysis, risk_tolerance=0.5):
-        """
-        Optimize portfolio with improved weighting to ensure:
-        1. Top 10 gainers are actually 10 stocks (when available)
-        2. Include commodity weights in total portfolio
-        3. Weights sum to 100%
-        4. Only positive expected returns in gainers
-        """
-        try:
-            # Filter for only positive expected returns in gainers
-            gainers = {t: s for t, s in recommendations.items() 
-                    if s > 0 and detailed_analysis[t]['expected_return'] > 0}
-            losers = {t: s for t, s in recommendations.items() 
-                    if detailed_analysis[t]['expected_return'] < 0}
-            
-            # Sort and get top 10 (or all if less than 10)
-            top_gainers = dict(sorted(gainers.items(), key=lambda x: x[1], reverse=True)[:10])
-            top_losers = dict(sorted(losers.items(), key=lambda x: x[1])[:10])
-            
-            # Calculate initial weights
-            total_portfolio_weight = 0.0
-            gainer_weights = {}
-            commodity_weights = {}
-            
-            # 1. Calculate gainer weights (70% of portfolio)
-            if top_gainers:
-                total_gain_score = sum(s for s in top_gainers.values())
-                for ticker, score in top_gainers.items():
-                    weight = (score / total_gain_score) * 0.70  # 70% allocation to gainers
-                    gainer_weights[ticker] = {
-                        'weight': weight,
-                        'expected_return': detailed_analysis[ticker]['expected_return'],
-                        'score': score,
-                        'current_price': detailed_analysis[ticker]['current_price']
+                try:
+                    print(f"\n{'='*50}")
+                    print(f"Processing {ticker}...")
+                    
+                    # Validate data
+                    if not self.validate_data(ticker, data):
+                        print(f"Validation failed for {ticker}")
+                        continue
+                    
+                    # Prepare data
+                    prepared_data = self.prepare_training_data(ticker, data)
+                    if prepared_data.empty:
+                        print(f"Failed to prepare data for {ticker}")
+                        continue
+                        
+                    print(f"Prepared data shape: {prepared_data.shape}")
+                    
+                    # Get current price
+                    if isinstance(data.columns, pd.MultiIndex):
+                        current_price = float(data[('Close', ticker)].iloc[-1])
+                    else:
+                        current_price = float(data['Close'].iloc[-1])
+                    print(f"Current price for {ticker}: ${current_price:.2f}")
+                    
+                    # Train model and get prediction
+                    try:
+                        print(f"Training model for {ticker}...")
+                        model = self.train_prediction_model(prepared_data)
+                        latest_data = prepared_data.iloc[-1:]
+                        feature_cols = [col for col in prepared_data.columns if col != 'Close']
+                        prediction = model.predict(latest_data[feature_cols])
+                        expected_return = (prediction[0] - current_price) / current_price
+                        print(f"Prediction: ${prediction[0]:.2f}")
+                        print(f"Expected return: {expected_return:.2%}")
+                    except Exception as e:
+                        print(f"Error in prediction for {ticker}: {str(e)}")
+                        continue
+                    
+                    # Get fundamental and sentiment scores
+                    try:
+                        fundamental_data = self.fetch_fundamental_data(ticker)
+                        is_etf = self.is_etf(ticker)
+                        normalized_fundamental_score, valid_metrics = self.normalize_fundamental_score(
+                            fundamental_data, is_etf)
+                        sentiment_data = self.fetch_news_sentiment(ticker)
+                        sentiment_score = sentiment_data.get('avg_sentiment', 0)
+                    except Exception as e:
+                        print(f"Error in scoring for {ticker}: {str(e)}")
+                        continue
+                    
+                    # Calculate final score
+                    total_score = (
+                        expected_return * 0.5 + 
+                        normalized_fundamental_score * 0.3 + 
+                        sentiment_score * 0.2
+                    )
+                    
+                    # Store results
+                    detailed_analysis[ticker] = {
+                        'total_score': total_score,
+                        'expected_return': expected_return,
+                        'fundamental_score': normalized_fundamental_score,
+                        'sentiment_score': sentiment_score,
+                        'current_price': current_price,
+                        'metrics_count': valid_metrics
                     }
-                    total_portfolio_weight += weight
-            
-            # 2. Calculate commodity weights (20% of portfolio)
-            portfolio_volatility = self.calculate_portfolio_volatility(list(gainer_weights.keys()))
-            market_correlation = self.calculate_market_correlation(list(gainer_weights.keys()))
-            commodity_hedging = self.analyze_commodity_hedging(portfolio_volatility, market_correlation)
-            
-            # Normalize commodity weights to exactly 20%
-            if commodity_hedging:
-                total_commodity_weight = sum(commodity_hedging.values())
-                commodity_target_weight = 0.20  # 20% allocation to commodities
-                commodity_weights = {
-                    k: (v / total_commodity_weight) * commodity_target_weight 
-                    for k, v in commodity_hedging.items()
-                }
-                total_portfolio_weight += commodity_target_weight
-            
-            # 3. Calculate defensive/cash position (remaining 10%)
-            cash_weight = 1.0 - total_portfolio_weight
-            
-            # Verify total weights sum to 100%
-            assert abs(sum(w['weight'] for w in gainer_weights.values()) + 
-                    sum(commodity_weights.values()) + 
-                    cash_weight - 1.0) < 0.0001, "Weights don't sum to 100%"
-            
-            return {
-                'gainers': gainer_weights,
-                'commodities': commodity_weights,
-                'cash_weight': cash_weight
-            }
+                    
+                    recommendations[ticker] = total_score
+                    processed_tickers.add(ticker)
+                    print(f"Successfully processed {ticker}")
+                    
+                except Exception as e:
+                    print(f"Error processing {ticker}: {str(e)}")
+                    continue
+                    
+            # Print final summary
+            print("\n" + "="*50)
+            print(f"Successfully processed {len(recommendations)} stocks")
+            if recommendations:
+                print("\nTop recommendations:")
+                for ticker, score in sorted(recommendations.items(), key=lambda x: x[1], reverse=True)[:5]:
+                    analysis = detailed_analysis[ticker]
+                    print(f"{ticker}: Score={score:.2f}, Return={analysis['expected_return']:.2%}, "
+                        f"Fundamental={analysis['fundamental_score']:.2f}, "
+                        f"Sentiment={analysis['sentiment_score']:.2f}")
+            else:
+                print("No recommendations generated")
+                
+            return recommendations, detailed_analysis
             
         except Exception as e:
-            print(f"Error in optimize_portfolio: {e}")
-            return {'gainers': {}, 'commodities': {}, 'cash_weight': 1.0}
+            print(f"Critical error in recommendation generation: {e}")
+            return {}, {}
+
+
+
 
 
 
@@ -746,8 +765,9 @@ class EnhancedStockAnalysis:
         except Exception as e:
             print(f"Error calculating market correlation: {e}")
             return 0.0
+    
     def analyze_commodity_hedging(self, portfolio_volatility, market_correlation):
-        """Enhanced commodity ETF hedging analysis with proper column handling"""
+        """Enhanced commodity ETF hedging analysis with proper MultiIndex handling"""
         try:
             commodity_etfs = {
                 'GLD': 'gold',
@@ -761,53 +781,208 @@ class EnhancedStockAnalysis:
             
             hedging_allocation = {}
             
-            # Download commodity ETF data - use Close price instead of Adj Close
-            commodity_data = yf.download(list(commodity_etfs.keys()), period="6mo")['Close']
-            returns = commodity_data.pct_change().dropna()
+            # Download commodity ETF data
+            commodity_data = yf.download(list(commodity_etfs.keys()), period="6mo")
+            
+            # Handle both MultiIndex and regular DataFrame cases
+            if isinstance(commodity_data.columns, pd.MultiIndex):
+                # Extract Close prices from MultiIndex
+                close_data = pd.DataFrame()
+                for etf in commodity_etfs.keys():
+                    if ('Close', etf) in commodity_data.columns:
+                        close_data[etf] = commodity_data[('Close', etf)]
+            else:
+                close_data = commodity_data['Close']
+                
+            # Calculate returns and other metrics
+            returns = close_data.pct_change().dropna()
             volatilities = returns.std() * np.sqrt(252)
             
-            # Calculate momentum scores
-            momentum = (commodity_data.iloc[-1] / commodity_data.iloc[-126] - 1)
+            # Calculate momentum scores using the last 126 trading days (approximately 6 months)
+            momentum = (close_data.iloc[-1] / close_data.iloc[-126] - 1)
             
             for etf in commodity_etfs:
-                if etf in volatilities.index and etf in momentum.index:
+                if etf in returns.columns:
+                    # Calculate volatility score (lower volatility is better)
                     vol_score = 1 - (volatilities[etf] / volatilities.max())
+                    
+                    # Calculate momentum score (higher momentum is better)
                     mom_score = (momentum[etf] - momentum.min()) / (momentum.max() - momentum.min())
+                    
+                    # Combine scores
                     score = (vol_score + mom_score) / 2
                     
+                    # Determine allocation based on market correlation
                     if score > 0.5:
                         if market_correlation > 0.7:
-                            hedging_allocation[etf] = score * 0.05
+                            hedging_allocation[etf] = score * 0.05  # Higher allocation for high correlation
                         else:
-                            hedging_allocation[etf] = score * 0.03
+                            hedging_allocation[etf] = score * 0.03  # Lower allocation for low correlation
             
-            # Normalize allocations
+            # Normalize allocations to respect maximum commodity exposure
             if hedging_allocation:
                 total_allocation = sum(hedging_allocation.values())
-                max_commodity_exposure = 0.20
+                max_commodity_exposure = 0.20  # 20% maximum commodity exposure
+                
                 if total_allocation > 0:
-                    hedging_allocation = {k: (v/total_allocation) * max_commodity_exposure 
-                                    for k, v in hedging_allocation.items()}
+                    hedging_allocation = {
+                        k: (v/total_allocation) * max_commodity_exposure 
+                        for k, v in hedging_allocation.items()
+                    }
             
             return hedging_allocation
             
         except Exception as e:
-            print(f"Error in analyze_commodity_hedging: {e}")
+            print(f"Error in analyze_commodity_hedging: {str(e)}")
+            return {}
+    
+
+
+
+
+
+    def optimize_dynamic_portfolio(self, timeframe, tickers):
+        """Optimize portfolio with proper risk handling"""
+        try:
+            market_conditions = self.analyze_market_conditions()
+            recommendations, detailed_analysis = self.generate_enhanced_recommendations(tickers)
+            
+            # Calculate risk contributions as a dictionary
+            risk_contributions = {}
+            portfolio_vol = self.calculate_portfolio_volatility(tickers)
+            
+            # Calculate individual stock volatilities
+            stock_data = yf.download(tickers, period="1y")['Close']
+            for ticker in tickers:
+                if isinstance(stock_data, pd.DataFrame):
+                    returns = stock_data[ticker].pct_change().dropna()
+                else:
+                    returns = stock_data.pct_change().dropna()
+                risk_contributions[ticker] = float(returns.std() * np.sqrt(252))
+            
+            # Dynamic allocation based on market conditions and risk
+            allocations = self._calculate_dynamic_allocations(
+                recommendations=recommendations,
+                market_conditions=market_conditions,
+                risk_contributions=risk_contributions
+            )
+            
+            return {
+                'market_conditions': market_conditions,
+                'allocations': allocations,
+                'risk_metrics': risk_contributions
+            }
+            
+        except Exception as e:
+            logger = logging.getLogger('StockAnalysis')
+            logger.error(f"Error in portfolio optimization: {e}")
+            return None
+        
+
+
+    
+
+
+    def _calculate_dynamic_allocations(self, recommendations, market_conditions, risk_contributions):
+        """Calculate allocations with improved risk management"""
+        stress_level = market_conditions['market_stress']
+        
+        # Adjust base allocations for market stress
+        equity_allocation = max(0.3, min(0.6, 0.6 * (1 - stress_level)))
+        commodity_allocation = min(0.35, 0.25 + (stress_level * 0.2))
+        defensive_allocation = min(0.35, 0.15 + (stress_level * 0.3))
+        
+        # Calculate position sizes with risk adjustment
+        position_sizes = {}
+        for ticker, score in recommendations.items():
+            risk_adjustment = 1 - risk_contributions.get(ticker, 0.5)
+            position_size = (
+                equity_allocation * 
+                (score / sum(recommendations.values())) * 
+                risk_adjustment
+            )
+            position_sizes[ticker] = min(
+                self.config['position_limits']['max'],
+                max(self.config['position_limits']['min'], position_size)
+            )
+            
+        return {
+            'stocks': position_sizes,
+            'commodities': self._allocate_commodities(commodity_allocation),
+            'defensive': defensive_allocation
+        }
+
+    def _allocate_commodities(self, total_allocation):
+        """Allocate commodities with proper error handling"""
+        try:
+            commodity_weights = {
+                'GLD': 0.3,  # Gold
+                'SLV': 0.2,  # Silver
+                'DBC': 0.2,  # Broad commodities
+                'USO': 0.15, # Oil
+                'UNG': 0.15  # Natural gas
+            }
+            
+            return {
+                ticker: weight * total_allocation 
+                for ticker, weight in commodity_weights.items()
+            }
+        except Exception as e:
+            logger = logging.getLogger('StockAnalysis')
+            logger.error(f"Error in commodity allocation: {e}")
             return {}
 
 
+    
+    def _calculate_market_stress(self, volatility, vix, trend_strength):
+        """Calculate market stress with improved normalization"""
+        try:
+            # Normalize inputs
+            vol_score = min(1.0, max(0.0, volatility / 0.4))
+            vix_score = min(1.0, max(0.0, vix / 35.0))
+            trend_score = min(1.0, max(0.0, -trend_strength / 0.1))
+            
+            # Weight and combine scores
+            weights = {
+                'volatility': 0.4,
+                'vix': 0.4,
+                'trend': 0.2
+            }
+            
+            stress_score = (
+                vol_score * weights['volatility'] +
+                vix_score * weights['vix'] +
+                trend_score * weights['trend']
+            )
+            
+            return float(min(1.0, max(0.0, stress_score)))
+            
+        except Exception as e:
+            logger = logging.getLogger('StockAnalysis')
+            logger.error(f"Error calculating market stress: {e}")
+            return 0.5
 
 def fetch_all_tickers():
     """Fetch all tickers for analysis"""
-    islamic_us_etfs = ['SPUS', 'HLAL', 'SPSK', 'SPRE', 'SPTE', 'SPWO', 'UMMA']
-    top_tech = ['AAPL', 'MSFT', 'AMZN', 'GOOGL', 'TSLA', 'NVDA', 'PYPL', 'ADBE', 'INTC', 'CSCO']
-    top_etfs = ['SPY', 'QQQ', 'DIA', 'IWM', 'VTI', 'VEA', 'VWO', 'VTV', 'VUG', 'VOO']
-    commodity_etfs = ['GLD', 'SLV', 'USO', 'UNG', 'PPLT', 'PALL', 'WEAT', 'CORN', 'DBA', 'DBB', 'DBC', 'DBO', 'DBP']
-    sample_stocks = ['AAPL', 'TSLA', 'MSFT', 'AMZN', 'GOOGL', 'NVDA']
+    #islamic_us_etfs = ['SPUS', 'HLAL', 'SPSK', 'SPRE', 'SPTE', 'SPWO', 'UMMA']
+    #top_tech = ['AAPL', 'MSFT', 'AMZN', 'GOOGL', 'TSLA', 'NVDA', 'PYPL', 'ADBE', 'INTC', 'CSCO']
+    #top_etfs = ['SPY', 'QQQ', 'DIA', 'IWM', 'VTI', 'VEA', 'VWO', 'VTV', 'VUG', 'VOO']
+    #commodity_etfs = ['GLD', 'SLV', 'USO', 'UNG', 'PPLT', 'PALL', 'WEAT', 'CORN', 'DBA', 'DBB', 'DBC', 'DBO', 'DBP']
+    #sample_stocks = ['AAPL', 'TSLA', 'MSFT', 'AMZN', 'GOOGL', 'NVDA']
     
-    # Return all categories of tickers
-    return sample_stocks
-        
+    #all_needed_tickers  = islamic_us_etfs+commodity_etfs+top_tech
+    ## Return all categories of tickers
+    #return all_needed_tickers
+
+    """Fetch a focused list of tickers for analysis"""
+    islamic_us_etfs = ['SPUS', 'HLAL']  # Core Islamic ETFs
+    tech_stocks = ['GOOGL', 'AMZN', 'TSLA', 'AAPL', 'MSFT']  # Major tech stocks
+    commodities = ['SLV', 'GLD', 'USO', 'DBC', 'UNG']  # Core commodities
+    
+    # Return deduplicated list
+    return list(set(islamic_us_etfs + tech_stocks + commodities))
+
+# Main function remains the same
 def main():
     # Initialize API keys
     api_keys = {
@@ -815,38 +990,87 @@ def main():
         'fred': 'cd852e18eff164cf69663b2b638f9d1e'
     }
     
-    # Initialize analyzer
-    analyzer = EnhancedStockAnalysis(api_keys)
-    tickers = fetch_all_tickers()
-    
-    print("Analyzing market data...")
-    recommendations, detailed_analysis = analyzer.generate_enhanced_recommendations(tickers)
-    
-    portfolio = analyzer.optimize_portfolio(recommendations, detailed_analysis, risk_tolerance=0.6)
-    
-    print("\nComplete Portfolio Allocation:")
-    print("\nEquity Portion (70% Target):")
-    total_equity = 0
-    for ticker, info in sorted(portfolio['gainers'].items(), 
-                             key=lambda x: x[1]['score'], reverse=True):
-        weight = info['weight']
-        total_equity += weight
-        print(f"{ticker:6} - Weight: {weight:7.2%}, "
-              f"Expected Return: {info['expected_return']:7.2%}, "
-              f"Current Price: ${info['current_price']:8.2f}")
-    print(f"Total Equity Weight: {total_equity:.2%}")
-    
-    print("\nCommodity Portion (20% Target):")
-    total_commodity = 0
-    for ticker, weight in sorted(portfolio['commodities'].items(), 
-                               key=lambda x: x[1], reverse=True):
-        total_commodity += weight
-        print(f"{ticker:6} - Weight: {weight:7.2%}")
-    print(f"Total Commodity Weight: {total_commodity:.2%}")
-    
-    print(f"\nCash/Defensive Position: {portfolio['cash_weight']:.2%}")
-    print(f"Total Portfolio Weight: {(total_equity + total_commodity + portfolio['cash_weight']):.2%}")
-
+    try:
+        logger.info("\n====== AMAI Stock Advisor Analysis ======")
+        logger.info("Initializing stock analyzer...")
+        analyzer = EnhancedStockAnalysis(api_keys)
+        
+        # Get tickers
+        tickers = fetch_all_tickers()
+        logger.info(f"Analyzing {len(tickers)} tickers: {', '.join(tickers)}")
+        
+        # 1. Analyze market conditions
+        logger.info("\n=== Market Conditions Analysis ===")
+        market_conditions = analyzer.analyze_market_conditions()
+        
+        logger.info(f"Current market stress level: {market_conditions['market_stress']*100:.2f}%")
+        logger.info(f"Current volatility: {market_conditions['current_volatility']*100:.2f}%")
+        logger.info(f"VIX level: {market_conditions['vix_level']:.2f}")
+        logger.info(f"Recent market trend: {market_conditions['market_trend']:.2f}%")
+        
+        # 2. Generate stock recommendations
+        logger.info("\n=== Stock Recommendations ===")
+        recommendations, detailed_analysis = analyzer.generate_enhanced_recommendations(tickers)
+        
+        # Sort and display top recommendations
+        sorted_recommendations = sorted(detailed_analysis.items(), 
+                                     key=lambda x: x[1]['total_score'], 
+                                     reverse=True)
+        
+        logger.info("\nTop Stock Recommendations:")
+        for ticker, analysis in sorted_recommendations[:5]:
+            logger.info(f"\nStock: {ticker}")
+            logger.info(f"Total Score: {analysis['total_score']:.2f}")
+            logger.info(f"Expected Return: {analysis['expected_return']*100:.2f}%")
+            logger.info(f"Fundamental Score: {analysis['fundamental_score']:.2f}")
+            logger.info(f"Sentiment Score: {analysis['sentiment_score']:.2f}")
+            logger.info(f"Current Price: ${analysis['current_price']:.2f}")
+        
+        # 3. Calculate portfolio metrics
+        logger.info("\n=== Portfolio Analysis ===")
+        portfolio_volatility = analyzer.calculate_portfolio_volatility(tickers)
+        market_correlation = analyzer.calculate_market_correlation(tickers)
+        
+        logger.info(f"Portfolio Volatility: {portfolio_volatility*100:.2f}%")
+        logger.info(f"Market Correlation: {market_correlation:.2f}")
+        
+        # 4. Analyze hedging opportunities
+        logger.info("\n=== Hedging Recommendations ===")
+        hedging_allocation = analyzer.analyze_commodity_hedging(
+            portfolio_volatility, 
+            market_correlation
+        )
+        
+        if hedging_allocation:
+            logger.info("\nRecommended Hedging Allocation:")
+            for etf, allocation in hedging_allocation.items():
+                logger.info(f"{etf}: {allocation*100:.1f}%")
+        else:
+            logger.info("No hedging allocation recommended at this time")
+        
+        # 5. Generate optimized portfolio
+        logger.info("\n=== Optimized Portfolio Allocation ===")
+        timeframes = ['1w', '1m', '3m', '1y']
+        
+        for timeframe in timeframes:
+            logger.info(f"\nOptimized Portfolio for {timeframe} horizon:")
+            portfolio = analyzer.optimize_dynamic_portfolio(timeframe, tickers)
+            
+            if portfolio:
+                logger.info("\nStock Allocations:")
+                for ticker, weight in portfolio['allocations']['stocks'].items():
+                    logger.info(f"{ticker}: {weight*100:.1f}%")
+                    
+                logger.info("\nCommodity Allocations:")
+                for ticker, weight in portfolio['allocations']['commodities'].items():
+                    logger.info(f"{ticker}: {weight*100:.1f}%")
+                    
+                logger.info(f"\nDefensive Allocation: {portfolio['allocations']['defensive']*100:.1f}%")
+        
+    except Exception as e:
+        logger.error(f"Critical error in main execution: {str(e)}")
+        logger.error("Stack trace:", exc_info=True)
+        logger.error("Please check API keys and data source connectivity")
 
 if __name__ == "__main__":
     main()
