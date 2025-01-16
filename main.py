@@ -133,10 +133,6 @@ class EnhancedStockAnalysis:
 
 
 
-
-
-
-
     def get_price_columns(self, data, ticker):
         """Helper function to extract price columns regardless of DataFrame structure"""
         if isinstance(data.columns, pd.MultiIndex):
@@ -384,10 +380,6 @@ class EnhancedStockAnalysis:
 
     
     
-    
-
-    
-    
     def prepare_training_data(self, ticker, data):
         """Enhanced data preparation with proper MultiIndex handling"""
         try:
@@ -431,8 +423,6 @@ class EnhancedStockAnalysis:
             print(f"Error preparing data for {ticker}: {str(e)}")
             return pd.DataFrame()
    
-
-
 
     def validate_data(self, ticker, data):
         """Validate data with enhanced checks"""
@@ -532,9 +522,6 @@ class EnhancedStockAnalysis:
         except Exception as e:
             self.logger.error(f"Error in normalize_fundamental_score: {e}")
             return 0, 0
-
-
-
 
 
     def fetch_macro_indicators(self):
@@ -724,9 +711,6 @@ class EnhancedStockAnalysis:
 
 
 
-
-
-
     def calculate_portfolio_volatility(self, tickers):
         """Calculate portfolio volatility with proper handling of pandas Series"""
         try:
@@ -754,8 +738,6 @@ class EnhancedStockAnalysis:
         except Exception as e:
             print(f"Error calculating portfolio volatility: {e}")
             return 0.0
-
-
 
 
 
@@ -855,7 +837,6 @@ class EnhancedStockAnalysis:
         except Exception as e:
             print(f"Error in analyze_commodity_hedging: {str(e)}")
             return {}
-    
 
 
 
@@ -901,12 +882,6 @@ class EnhancedStockAnalysis:
             logger.error(f"Error in portfolio optimization: {e}")
             return None
 
- 
- 
-
-
-
-    
 
 
     def _calculate_dynamic_allocations(self, recommendations, market_conditions, risk_contributions):
@@ -1220,10 +1195,10 @@ class PortfolioRecommender:
 
 def fetch_all_tickers():
     """Fetch all tickers for analysis"""
-    #islamic_us_etfs = ['SPUS', 'HLAL', 'SPSK', 'SPRE', 'SPTE', 'SPWO', 'UMMA']
-    #top_tech = ['AAPL', 'MSFT', 'AMZN', 'GOOGL', 'TSLA', 'NVDA', 'PYPL', 'ADBE', 'INTC', 'CSCO']
-    #top_etfs = ['SPY', 'QQQ', 'DIA', 'IWM', 'VTI', 'VEA', 'VWO', 'VTV', 'VUG', 'VOO']
-    #commodity_etfs = ['GLD', 'SLV', 'USO', 'UNG', 'PPLT', 'PALL', 'WEAT', 'CORN', 'DBA', 'DBB', 'DBC', 'DBO', 'DBP']
+    islamic_us_etfs = ['SPUS', 'HLAL', 'SPSK', 'SPRE', 'SPTE', 'SPWO', 'UMMA']
+    top_tech = ['AAPL', 'MSFT', 'AMZN', 'GOOGL', 'TSLA', 'NVDA', 'PYPL', 'ADBE', 'INTC', 'CSCO']
+    top_etfs = ['SPY', 'QQQ', 'DIA', 'IWM', 'VTI', 'VEA', 'VWO', 'VTV', 'VUG', 'VOO']
+    commodity_etfs = ['GLD', 'SLV', 'USO', 'UNG', 'PPLT', 'PALL', 'WEAT', 'CORN', 'DBA', 'DBB', 'DBC', 'DBO', 'DBP']
     #sample_stocks = ['AAPL', 'TSLA', 'MSFT', 'AMZN', 'GOOGL', 'NVDA']
     
     #all_needed_tickers  = islamic_us_etfs+commodity_etfs+top_tech
@@ -1231,12 +1206,12 @@ def fetch_all_tickers():
     #return all_needed_tickers
 
     """Fetch a focused list of tickers for analysis"""
-    islamic_us_etfs = ['SPUS', 'HLAL']  # Core Islamic ETFs
-    tech_stocks = ['GOOGL', 'AMZN', 'TSLA', 'AAPL', 'MSFT']  # Major tech stocks
-    commodities = ['SLV', 'GLD', 'USO', 'DBC', 'UNG']  # Core commodities
+    #islamic_us_etfs = ['SPUS', 'HLAL']  # Core Islamic ETFs
+    #tech_stocks = ['GOOGL', 'AMZN', 'TSLA', 'AAPL', 'MSFT']  # Major tech stocks
+    #commodities = ['SLV', 'GLD', 'USO', 'DBC', 'UNG']  # Core commodities
     
     # Return deduplicated list
-    return list(set(islamic_us_etfs + tech_stocks + commodities))
+    return list(set(islamic_us_etfs + top_tech + top_etfs + commodity_etfs))
 
 def main():
     # Initialize API keys
