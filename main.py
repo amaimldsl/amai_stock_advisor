@@ -1484,7 +1484,7 @@ def fetch_all_tickers():
     #commodities = ['SLV', 'GLD', 'USO', 'DBC', 'UNG']  # Core commodities
     
     # Return deduplicated list
-    return list(set(islamic_us_etfs + top_tech + top_etfs ))
+    return list(set(islamic_us_etfs + top_tech  ))
 
 def main():
     # Initialize API keys
