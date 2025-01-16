@@ -1140,36 +1140,37 @@ class PortfolioRecommender:
                 cached_recommendations=(base_recommendations, detailed_analysis)
             )
             
-            # Sort stocks by expected return
-            stocks_by_return = sorted(
-                detailed_analysis.items(),
-                key=lambda x: x[1]['expected_return'],
-                reverse=True
-            )
+            # Create list of stocks with their metrics
+            stock_metrics = []
+            for ticker, analysis in detailed_analysis.items():
+                expected_return = analysis['expected_return']
+                current_price = analysis['current_price']
+                target_price = current_price * (1 + expected_return)
+                
+                stock_metrics.append({
+                    'ticker': ticker,
+                    'expected_return': expected_return * 100,  # Convert to percentage
+                    'current_price': current_price,
+                    'target_price': target_price
+                })
             
-            # Get top 5 buys and sells
-            top_buys = stocks_by_return[:5]
-            top_sells = stocks_by_return[-5:]
+            # Sort stocks by expected return
+            sorted_stocks = sorted(stock_metrics, key=lambda x: x['expected_return'], reverse=True)
+            
+            # Get top 5 gainers (highest positive returns) for buying
+            top_buys = [stock for stock in sorted_stocks if stock['expected_return'] > 0][:5]
+            if len(top_buys) < 5:  # If we don't have 5 stocks with positive returns
+                top_buys.extend([stock for stock in sorted_stocks if stock['expected_return'] <= 0][:5-len(top_buys)])
+            
+            # Get top 5 losers (lowest negative returns) for selling
+            bottom_stocks = sorted(stock_metrics, key=lambda x: x['expected_return'])
+            top_sells = bottom_stocks[:5]
             
             recommendations[timeframe] = {
                 'portfolio_allocation': portfolio['allocations'],
                 'market_conditions': market_conditions,
-                'top_buys': [
-                    {
-                        'ticker': stock[0],
-                        'expected_return': stock[1]['expected_return'] * 100,
-                        'current_price': stock[1]['current_price'],
-                        'target_price': stock[1]['current_price'] * (1 + stock[1]['expected_return'])
-                    } for stock in top_buys
-                ],
-                'top_sells': [
-                    {
-                        'ticker': stock[0],
-                        'expected_return': stock[1]['expected_return'] * 100,
-                        'current_price': stock[1]['current_price'],
-                        'target_price': stock[1]['current_price'] * (1 + stock[1]['expected_return'])
-                    } for stock in top_sells
-                ]
+                'top_buys': top_buys,
+                'top_sells': top_sells
             }
         
         return recommendations
@@ -1180,7 +1181,7 @@ class PortfolioRecommender:
         
         for timeframe, data in recommendations.items():
             period = self.timeframes[timeframe]['description']
-            report.append(f"\n=== {period} Outlook ===")
+            report.append(f"\n{'='*20} {period} Outlook {'='*20}")
             
             # Market conditions
             market_stress = data['market_conditions']['market_stress'] * 100
@@ -1192,26 +1193,28 @@ class PortfolioRecommender:
             report.append("Stocks:")
             for ticker, alloc in allocations['stocks'].items():
                 report.append(f"  - {ticker}: {alloc*100:.1f}%")
-            report.append("Commodities (Hedging):")
+            report.append("\nCommodities (Hedging):")
             for ticker, alloc in allocations['commodities'].items():
                 report.append(f"  - {ticker}: {alloc*100:.1f}%")
-            report.append(f"Defensive Assets: {allocations['defensive']*100:.1f}%")
+            report.append(f"\nDefensive Assets: {allocations['defensive']*100:.1f}%")
             
-            # Top buys
-            report.append("\nTop 5 Stocks to Buy:")
-            for stock in data['top_buys']:
+            # Top buys - sorted by highest gains first
+            report.append(f"\nTop 5 Stocks to Buy ({period}):")
+            for i, stock in enumerate(data['top_buys'], 1):
                 report.append(
-                    f"  - {stock['ticker']}: Expected Gain = {stock['expected_return']:.1f}%"
+                    f"{i}. {stock['ticker']}: Expected Gain = {stock['expected_return']:+.1f}%"
                     f" (Current: ${stock['current_price']:.2f} → Target: ${stock['target_price']:.2f})"
                 )
             
-            # Top sells
-            report.append("\nTop 5 Stocks to Sell:")
-            for stock in data['top_sells']:
+            # Top sells - sorted by highest losses first
+            report.append(f"\nTop 5 Stocks to Sell ({period}):")
+            for i, stock in enumerate(data['top_sells'], 1):
                 report.append(
-                    f"  - {stock['ticker']}: Expected Loss = {stock['expected_return']:.1f}%"
+                    f"{i}. {stock['ticker']}: Expected Return = {stock['expected_return']:+.1f}%"
                     f" (Current: ${stock['current_price']:.2f} → Target: ${stock['target_price']:.2f})"
                 )
+            
+            report.append("\n" + "="*50)
         
         return "\n".join(report)
 
