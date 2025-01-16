@@ -152,8 +152,99 @@ class EnhancedStockAnalysis:
                 'Volume': data['Volume']
             }
         
+
+    def enhanced_peer_analysis(self, ticker):
+        """Comprehensive peer analysis"""
+        try:
+            # Get peer companies from Finnhub
+            peers = self.finnhub_client.company_peers(ticker)
+            
+            if not peers:
+                return {}
+                
+            # Limit to top 5 peers for efficiency
+            peers = peers[:5]
+            peers.append(ticker)  # Add original ticker for comparison
+            
+            # Get key metrics for all peers
+            peer_metrics = {}
+            for peer in peers:
+                try:
+                    metrics = self.fetch_fundamental_data(peer)
+                    stock_data = yf.download(peer, period='1y')
+                    
+                    if not metrics or stock_data.empty:
+                        continue
+                        
+                    peer_metrics[peer] = {
+                        'fundamentals': metrics,
+                        'technical': {
+                            'returns_1y': self._calculate_return(stock_data, 252),
+                            'volatility': stock_data['Close'].pct_change().std() * np.sqrt(252),
+                            'beta': self._calculate_beta(stock_data)
+                        }
+                    }
+                except Exception:
+                    continue
+            
+            # Calculate relative rankings
+            rankings = self._calculate_peer_rankings(peer_metrics)
+            
+            return {
+                'peer_metrics': peer_metrics,
+                'rankings': rankings
+            }
+            
+        except Exception as e:
+            print(f"Error in peer analysis: {e}")
+            return {}
+
+
+    def _calculate_beta(self, data):
+        """Calculate beta relative to market"""
+        try:
+            spy_data = yf.download('SPY', start=data.index[0], end=data.index[-1])
+            if not spy_data.empty:
+                stock_returns = data['Close'].pct_change().dropna()
+                market_returns = spy_data['Close'].pct_change().dropna()
+                covariance = np.cov(stock_returns, market_returns)[0][1]
+                market_variance = np.var(market_returns)
+                return covariance / market_variance
+        except:
+            pass
+        return None
+
+
+    def _calculate_peer_rankings(self, peer_metrics):
+        """Calculate relative rankings among peers"""
+        rankings = {}
+        metrics_to_rank = {
+            'P/E': 'asc',
+            'ROE': 'desc',
+            'Revenue_Growth': 'desc',
+            'Profit_Margin': 'desc',
+            'returns_1y': 'desc',
+            'volatility': 'asc'
+        }
+        
+        for metric, direction in metrics_to_rank.items():
+            values = []
+            for peer, data in peer_metrics.items():
+                if metric in ['returns_1y', 'volatility']:
+                    value = data['technical'].get(metric)
+                else:
+                    value = data['fundamentals'].get(metric)
+                if value is not None:
+                    values.append((peer, value))
+            
+            if values:
+                sorted_values = sorted(values, key=lambda x: x[1], reverse=(direction == 'desc'))
+                rankings[metric] = {peer: rank + 1 for rank, (peer, _) in enumerate(sorted_values)}
+        
+        return rankings
+
     def calculate_technical_indicators(self, data, ticker):
-        """Enhanced technical indicators with error recovery"""
+        """Enhanced technical indicators with comprehensive metrics"""
         try:
             prices = self.get_price_columns(data, ticker)
             df_new = pd.DataFrame(index=data.index)
@@ -162,37 +253,150 @@ class EnhancedStockAnalysis:
             for col_name, series in prices.items():
                 df_new[col_name] = series
                 
-            # Technical indicators with individual try-except blocks
-            try:
-                df_new['SMA_20'] = prices['Close'].rolling(window=20).mean()
-            except Exception as e:
-                print(f"Error calculating SMA: {e}")
-                df_new['SMA_20'] = None
-                
-            try:
-                df_new['EMA_20'] = prices['Close'].ewm(span=20, adjust=False).mean()
-            except Exception as e:
-                print(f"Error calculating EMA: {e}")
-                df_new['EMA_20'] = None
-                
-            try:
-                # RSI with better error handling
-                delta = prices['Close'].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                rs = gain / loss
-                df_new['RSI'] = 100 - (100 / (1 + rs))
-            except Exception as e:
-                print(f"Error calculating RSI: {e}")
-                df_new['RSI'] = None
-                
+            # Moving Averages
+            windows = [20, 50, 200]
+            for window in windows:
+                df_new[f'SMA_{window}'] = prices['Close'].rolling(window=window).mean()
+                df_new[f'EMA_{window}'] = prices['Close'].ewm(span=window, adjust=False).mean()
+            
+            # Bollinger Bands
+            for window in [20]:
+                middle_band = prices['Close'].rolling(window=window).mean()
+                std_dev = prices['Close'].rolling(window=window).std()
+                df_new[f'BB_Upper_{window}'] = middle_band + (std_dev * 2)
+                df_new[f'BB_Middle_{window}'] = middle_band
+                df_new[f'BB_Lower_{window}'] = middle_band - (std_dev * 2)
+            
+            # MACD
+            exp1 = prices['Close'].ewm(span=12, adjust=False).mean()
+            exp2 = prices['Close'].ewm(span=26, adjust=False).mean()
+            df_new['MACD'] = exp1 - exp2
+            df_new['Signal_Line'] = df_new['MACD'].ewm(span=9, adjust=False).mean()
+            df_new['MACD_Histogram'] = df_new['MACD'] - df_new['Signal_Line']
+            
+            # Stochastic Oscillator
+            low_min = prices['Low'].rolling(window=14).min()
+            high_max = prices['High'].rolling(window=14).max()
+            df_new['%K'] = ((prices['Close'] - low_min) / (high_max - low_min)) * 100
+            df_new['%D'] = df_new['%K'].rolling(window=3).mean()
+            
+            # RSI with enhanced sensitivity
+            delta = prices['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            df_new['RSI'] = 100 - (100 / (1 + rs))
+            
+            # Volume-based indicators
+            df_new['OBV'] = (np.sign(prices['Close'].diff()) * prices['Volume']).cumsum()
+            df_new['Volume_MA'] = prices['Volume'].rolling(window=20).mean()
+            
             return df_new
             
         except Exception as e:
-            print(f"Critical error in technical indicators: {e}")
+            print(f"Error in technical indicators: {e}")
             return pd.DataFrame()
-                    
+
+
+    def analyze_social_sentiment(self, ticker):
+        """Analyze social media sentiment"""
+        try:
+            # Get news sentiment from Finnhub
+            news_sentiment = self.finnhub_client.news_sentiment(ticker)
             
+            # Calculate aggregate sentiment scores
+            sentiment_scores = {
+                'buzz': {
+                    'weekly_avg_articles': news_sentiment.get('buzz', {}).get('weeklyAverage', 0),
+                    'article_change': news_sentiment.get('buzz', {}).get('articleIncrease', 0)
+                },
+                'sentiment': {
+                    'bullish_percent': news_sentiment.get('sentiment', {}).get('bullishPercent', 0),
+                    'bearish_percent': news_sentiment.get('sentiment', {}).get('bearishPercent', 0)
+                },
+                'sector_comparison': {
+                    'sector_avg_bullish': news_sentiment.get('sectorAverageBullish', 0),
+                    'sector_avg_bearish': news_sentiment.get('sectorAverageBearish', 0)
+                }
+            }
+            
+            return sentiment_scores
+            
+        except Exception as e:
+            print(f"Error in social sentiment analysis: {e}")
+            return {}
+
+
+
+    def analyze_sector_performance(self, ticker):
+        """Analyze sector and industry performance"""
+        try:
+            # Get sector/industry info
+            stock_info = yf.Ticker(ticker).info
+            sector = stock_info.get('sector', '')
+            industry = stock_info.get('industry', '')
+            
+            # Define sector ETF mappings
+            sector_etfs = {
+                'Technology': 'XLK',
+                'Healthcare': 'XLV',
+                'Financial': 'XLF',
+                'Consumer Cyclical': 'XLY',
+                'Consumer Defensive': 'XLP',
+                'Energy': 'XLE',
+                'Materials': 'XLB',
+                'Industrial': 'XLI',
+                'Utilities': 'XLU',
+                'Real Estate': 'XLRE',
+                'Communication Services': 'XLC'
+            }
+            
+            sector_etf = sector_etfs.get(sector, 'SPY')  # Default to SPY if sector not found
+            
+            # Download sector ETF data
+            sector_data = yf.download(sector_etf, period='1y')
+            
+            # Calculate sector metrics
+            sector_performance = {
+                'sector': sector,
+                'industry': industry,
+                'sector_etf': sector_etf,
+                'returns': {
+                    '1m': self._calculate_return(sector_data, 21),
+                    '3m': self._calculate_return(sector_data, 63),
+                    '6m': self._calculate_return(sector_data, 126),
+                    '1y': self._calculate_return(sector_data, 252)
+                },
+                'volatility': sector_data['Close'].pct_change().std() * np.sqrt(252),
+                'relative_strength': self._calculate_relative_strength(sector_data),
+                'momentum_score': self._calculate_momentum_score(sector_data)
+            }
+            
+            return sector_performance
+            
+        except Exception as e:
+            print(f"Error in sector analysis: {e}")
+            return {}
+
+    def _calculate_return(self, data, periods):
+        """Calculate return over specified periods"""
+        if len(data) >= periods:
+            return (data['Close'][-1] / data['Close'][-periods] - 1) * 100
+        return None
+
+
+    def _calculate_relative_strength(self, data):
+        """Calculate relative strength vs SPY"""
+        try:
+            spy_data = yf.download('SPY', start=data.index[0], end=data.index[-1])
+            if not spy_data.empty:
+                stock_returns = data['Close'].pct_change()
+                spy_returns = spy_data['Close'].pct_change()
+                return (stock_returns / spy_returns).mean()
+        except:
+            pass
+        return None
+
     def fetch_fundamental_data(self, ticker):
         """Fetch fundamental data with security type detection and appropriate metrics"""
         try:
@@ -461,7 +665,58 @@ class EnhancedStockAnalysis:
             logger.error(f"Error validating data for {ticker}: {e}")
             return False
 
-
+    def analyze_events(self, ticker):
+        """Analyze impact of events on stock performance"""
+        try:
+            # Get earnings dates
+            stock = yf.Ticker(ticker)
+            earnings_dates = stock.earnings_dates
+            
+            if earnings_dates is not None:
+                # Calculate earnings surprise impact
+                earnings_impact = []
+                for date, row in earnings_dates.iterrows():
+                    try:
+                        surprise_pct = row['Surprise(%)']
+                        if pd.notnull(surprise_pct):
+                            # Get stock price movement after earnings
+                            start_date = date
+                            end_date = date + pd.Timedelta(days=5)
+                            price_data = yf.download(ticker, start=start_date, end=end_date)
+                            if not price_data.empty:
+                                price_change = (price_data['Close'][-1] / price_data['Close'][0] - 1) * 100
+                                earnings_impact.append({
+                                    'date': date,
+                                    'surprise_pct': surprise_pct,
+                                    'price_change': price_change
+                                })
+                    except Exception:
+                        continue
+            
+            # Get recent news and calculate sentiment
+            news = self.finnhub_client.company_news(ticker, 
+                _from=(datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'),
+                to=datetime.now().strftime('%Y-%m-%d')
+            )
+            
+            news_impact = []
+            for article in news:
+                blob = TextBlob(article['headline'])
+                news_impact.append({
+                    'date': datetime.fromtimestamp(article['datetime']),
+                    'headline': article['headline'],
+                    'sentiment': blob.sentiment.polarity,
+                    'source': article['source']
+                })
+            
+            return {
+                'earnings_impact': earnings_impact,
+                'news_impact': news_impact
+            }
+            
+        except Exception as e:
+            print(f"Error in event analysis: {e}")
+            return {'earnings_impact': [], 'news_impact': []}
 
 
 
@@ -838,6 +1093,21 @@ class EnhancedStockAnalysis:
             print(f"Error in analyze_commodity_hedging: {str(e)}")
             return {}
 
+    def _calculate_momentum_score(self, data):
+        """Calculate momentum score based on multiple timeframes"""
+        try:
+            returns = {
+                '1m': self._calculate_return(data, 21),
+                '3m': self._calculate_return(data, 63),
+                '6m': self._calculate_return(data, 126),
+                '1y': self._calculate_return(data, 252)
+            }
+            
+            weights = {'1m': 0.4, '3m': 0.3, '6m': 0.2, '1y': 0.1}
+            score = sum(returns[period] * weight for period, weight in weights.items() if returns[period] is not None)
+            return score
+        except:
+            return None
 
 
     def optimize_dynamic_portfolio(self, timeframe, tickers, cached_recommendations=None):
@@ -1132,14 +1402,17 @@ class PortfolioRecommender:
             # Sort stocks by expected return
             sorted_stocks = sorted(stock_metrics, key=lambda x: x['expected_return'], reverse=True)
             
-            # Get top 5 gainers (highest positive returns) for buying
-            top_buys = [stock for stock in sorted_stocks if stock['expected_return'] > 0][:5]
-            if len(top_buys) < 5:  # If we don't have 5 stocks with positive returns
-                top_buys.extend([stock for stock in sorted_stocks if stock['expected_return'] <= 0][:5-len(top_buys)])
+            # Get top 10 gainers (highest positive returns) for buying
+            ##
+            top_buys = [stock for stock in sorted_stocks if stock['expected_return'] > 0][:10]
+            if len(top_buys) < 10:  # If we don't have 5 stocks with positive returns
+                top_buys.extend([stock for stock in sorted_stocks if stock['expected_return'] <= 0][:10-len(top_buys)])
             
-            # Get top 5 losers (lowest negative returns) for selling
+            # Get top 10 losers (lowest negative returns) for selling
+            ##
             bottom_stocks = sorted(stock_metrics, key=lambda x: x['expected_return'])
-            top_sells = bottom_stocks[:5]
+            ##
+            top_sells = bottom_stocks[:10]
             
             recommendations[timeframe] = {
                 'portfolio_allocation': portfolio['allocations'],
@@ -1174,7 +1447,7 @@ class PortfolioRecommender:
             report.append(f"\nDefensive Assets: {allocations['defensive']*100:.1f}%")
             
             # Top buys - sorted by highest gains first
-            report.append(f"\nTop 5 Stocks to Buy ({period}):")
+            report.append(f"\nTop 10 Stocks to Buy ({period}):")
             for i, stock in enumerate(data['top_buys'], 1):
                 report.append(
                     f"{i}. {stock['ticker']}: Expected Gain = {stock['expected_return']:+.1f}%"
@@ -1182,7 +1455,7 @@ class PortfolioRecommender:
                 )
             
             # Top sells - sorted by highest losses first
-            report.append(f"\nTop 5 Stocks to Sell ({period}):")
+            report.append(f"\nTop 10 Stocks to Sell ({period}):")
             for i, stock in enumerate(data['top_sells'], 1):
                 report.append(
                     f"{i}. {stock['ticker']}: Expected Return = {stock['expected_return']:+.1f}%"
@@ -1196,9 +1469,9 @@ class PortfolioRecommender:
 def fetch_all_tickers():
     """Fetch all tickers for analysis"""
     islamic_us_etfs = ['SPUS', 'HLAL', 'SPSK', 'SPRE', 'SPTE', 'SPWO', 'UMMA']
-    top_tech = ['AAPL', 'MSFT', 'AMZN', 'GOOGL', 'TSLA', 'NVDA', 'PYPL', 'ADBE', 'INTC', 'CSCO']
-    top_etfs = ['SPY', 'QQQ', 'DIA', 'IWM', 'VTI', 'VEA', 'VWO', 'VTV', 'VUG', 'VOO']
-    commodity_etfs = ['GLD', 'SLV', 'USO', 'UNG', 'PPLT', 'PALL', 'WEAT', 'CORN', 'DBA', 'DBB', 'DBC', 'DBO', 'DBP']
+    top_tech = ['AAPL', 'MSFT', 'AMZN', 'GOOGL', 'TSLA', 'NVDA', 'PYPL', 'ADBE', 'INTC', 'CSCO','MSTR','AVGO','AMD']
+    #top_etfs = ['SPY', 'QQQ', 'DIA', 'IWM', 'VTI', 'VEA', 'VWO', 'VTV', 'VUG', 'VOO']
+    #commodity_etfs = ['GLD', 'SLV', 'USO', 'UNG', 'PPLT', 'PALL', 'WEAT', 'CORN', 'DBA', 'DBB', 'DBC', 'DBO', 'DBP']
     #sample_stocks = ['AAPL', 'TSLA', 'MSFT', 'AMZN', 'GOOGL', 'NVDA']
     
     #all_needed_tickers  = islamic_us_etfs+commodity_etfs+top_tech
@@ -1211,7 +1484,7 @@ def fetch_all_tickers():
     #commodities = ['SLV', 'GLD', 'USO', 'DBC', 'UNG']  # Core commodities
     
     # Return deduplicated list
-    return list(set(islamic_us_etfs + top_tech + top_etfs + commodity_etfs))
+    return list(set(islamic_us_etfs + top_tech + top_etfs ))
 
 def main():
     # Initialize API keys
