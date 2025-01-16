@@ -3,14 +3,11 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.ensemble import RandomForestRegressor
-import requests
 from datetime import datetime, timedelta
 from textblob import TextBlob
 import finnhub
 from fredapi import Fred
 import logging
-import contextlib
-
 import yfinance as yf
 
 
@@ -1115,6 +1112,109 @@ class EnhancedStockAnalysis:
         except:
             return None
 
+
+
+class PortfolioRecommender:
+    def __init__(self, stock_analyzer):
+        self.analyzer = stock_analyzer
+        self.timeframes = {
+            '1w': {'days': 7, 'description': 'Weekly'},
+            '1m': {'days': 30, 'description': 'Monthly'},
+            '3m': {'days': 90, 'description': 'Quarterly'},
+            '1y': {'days': 365, 'description': 'Yearly'}
+        }
+    
+    def generate_recommendations(self, tickers):
+        """Generate comprehensive trading recommendations across timeframes"""
+        recommendations = {}
+        
+        # Get base analysis from the stock analyzer
+        base_recommendations, detailed_analysis = self.analyzer.generate_enhanced_recommendations(tickers)
+        market_conditions = self.analyzer.analyze_market_conditions()
+        
+        for timeframe, params in self.timeframes.items():
+            # Optimize portfolio for each timeframe
+            portfolio = self.analyzer.optimize_dynamic_portfolio(
+                timeframe=timeframe,
+                tickers=tickers,
+                cached_recommendations=(base_recommendations, detailed_analysis)
+            )
+            
+            # Sort stocks by expected return
+            stocks_by_return = sorted(
+                detailed_analysis.items(),
+                key=lambda x: x[1]['expected_return'],
+                reverse=True
+            )
+            
+            # Get top 5 buys and sells
+            top_buys = stocks_by_return[:5]
+            top_sells = stocks_by_return[-5:]
+            
+            recommendations[timeframe] = {
+                'portfolio_allocation': portfolio['allocations'],
+                'market_conditions': market_conditions,
+                'top_buys': [
+                    {
+                        'ticker': stock[0],
+                        'expected_return': stock[1]['expected_return'] * 100,
+                        'current_price': stock[1]['current_price'],
+                        'target_price': stock[1]['current_price'] * (1 + stock[1]['expected_return'])
+                    } for stock in top_buys
+                ],
+                'top_sells': [
+                    {
+                        'ticker': stock[0],
+                        'expected_return': stock[1]['expected_return'] * 100,
+                        'current_price': stock[1]['current_price'],
+                        'target_price': stock[1]['current_price'] * (1 + stock[1]['expected_return'])
+                    } for stock in top_sells
+                ]
+            }
+        
+        return recommendations
+
+    def format_recommendations(self, recommendations):
+        """Format recommendations into a clear, readable report"""
+        report = []
+        
+        for timeframe, data in recommendations.items():
+            period = self.timeframes[timeframe]['description']
+            report.append(f"\n=== {period} Outlook ===")
+            
+            # Market conditions
+            market_stress = data['market_conditions']['market_stress'] * 100
+            report.append(f"\nMarket Stress Level: {market_stress:.1f}%")
+            
+            # Portfolio allocation
+            report.append("\nRecommended Portfolio Allocation:")
+            allocations = data['portfolio_allocation']
+            report.append("Stocks:")
+            for ticker, alloc in allocations['stocks'].items():
+                report.append(f"  - {ticker}: {alloc*100:.1f}%")
+            report.append("Commodities (Hedging):")
+            for ticker, alloc in allocations['commodities'].items():
+                report.append(f"  - {ticker}: {alloc*100:.1f}%")
+            report.append(f"Defensive Assets: {allocations['defensive']*100:.1f}%")
+            
+            # Top buys
+            report.append("\nTop 5 Stocks to Buy:")
+            for stock in data['top_buys']:
+                report.append(
+                    f"  - {stock['ticker']}: Expected Gain = {stock['expected_return']:.1f}%"
+                    f" (Current: ${stock['current_price']:.2f} → Target: ${stock['target_price']:.2f})"
+                )
+            
+            # Top sells
+            report.append("\nTop 5 Stocks to Sell:")
+            for stock in data['top_sells']:
+                report.append(
+                    f"  - {stock['ticker']}: Expected Loss = {stock['expected_return']:.1f}%"
+                    f" (Current: ${stock['current_price']:.2f} → Target: ${stock['target_price']:.2f})"
+                )
+        
+        return "\n".join(report)
+
 def fetch_all_tickers():
     """Fetch all tickers for analysis"""
     #islamic_us_etfs = ['SPUS', 'HLAL', 'SPSK', 'SPRE', 'SPTE', 'SPWO', 'UMMA']
@@ -1135,7 +1235,6 @@ def fetch_all_tickers():
     # Return deduplicated list
     return list(set(islamic_us_etfs + tech_stocks + commodities))
 
-# Main function remains the same
 def main():
     # Initialize API keys
     api_keys = {
@@ -1143,44 +1242,18 @@ def main():
         'fred': 'cd852e18eff164cf69663b2b638f9d1e'
     }
     
-    try:
-        logger.info("\n====== AMAI Stock Advisor Analysis ======")
-        logger.info("Initializing stock analyzer...")
-        analyzer = EnhancedStockAnalysis(api_keys)
-        
-        # Get tickers
-        tickers = fetch_all_tickers()
-        logger.info(f"Analyzing {len(tickers)} tickers: {', '.join(tickers)}")
-        
-        # 1. Analyze market conditions
-        logger.info("\n=== Market Conditions Analysis ===")
-        market_conditions = analyzer.analyze_market_conditions()
-        
-        # 2. Generate stock recommendations (do this once and cache the results)
-        logger.info("\n=== Stock Recommendations ===")
-        cached_recommendations = analyzer.generate_enhanced_recommendations(tickers)
-        recommendations, detailed_analysis = cached_recommendations
-        
-        # ... (display recommendations code remains the same)
-        
-        # 5. Generate optimized portfolio using cached recommendations
-        logger.info("\n=== Optimized Portfolio Allocation ===")
-        timeframes = ['1w', '1m', '3m', '1y']
-        
-        for timeframe in timeframes:
-            logger.info(f"\nOptimized Portfolio for {timeframe} horizon:")
-            portfolio = analyzer.optimize_dynamic_portfolio(
-                timeframe, 
-                tickers, 
-                cached_recommendations=cached_recommendations
-            )
-            
-            # ... (rest of the portfolio display code remains the same)
-            
-    except Exception as e:
-        logger.error(f"Critical error in main execution: {str(e)}")
-        logger.error("Stack trace:", exc_info=True)
-        logger.error("Please check API keys and data source connectivity")
+    # Initialize analyzers
+    stock_analyzer = EnhancedStockAnalysis(api_keys)
+    portfolio_recommender = PortfolioRecommender(stock_analyzer)
+    
+    # Get tickers for analysis
+    tickers = fetch_all_tickers()
+    
+    # Generate recommendations
+    recommendations = portfolio_recommender.generate_recommendations(tickers)
+    
+    # Print formatted recommendations
+    print(portfolio_recommender.format_recommendations(recommendations))
 
 if __name__ == "__main__":
     main()
