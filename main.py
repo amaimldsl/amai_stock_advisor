@@ -1402,17 +1402,17 @@ class PortfolioRecommender:
             # Sort stocks by expected return
             sorted_stocks = sorted(stock_metrics, key=lambda x: x['expected_return'], reverse=True)
             
-            # Get top 10 gainers (highest positive returns) for buying
+            # Get top 25 gainers (highest positive returns) for buying
             ##
-            top_buys = [stock for stock in sorted_stocks if stock['expected_return'] > 0][:10]
-            if len(top_buys) < 10:  # If we don't have 5 stocks with positive returns
-                top_buys.extend([stock for stock in sorted_stocks if stock['expected_return'] <= 0][:10-len(top_buys)])
+            top_buys = [stock for stock in sorted_stocks if stock['expected_return'] > 0][:25]
+            if len(top_buys) < 25:  # If we don't have 5 stocks with positive returns
+                top_buys.extend([stock for stock in sorted_stocks if stock['expected_return'] <= 0][:25-len(top_buys)])
             
-            # Get top 10 losers (lowest negative returns) for selling
+            # Get top 25 losers (lowest negative returns) for selling
             ##
             bottom_stocks = sorted(stock_metrics, key=lambda x: x['expected_return'])
             ##
-            top_sells = bottom_stocks[:10]
+            top_sells = bottom_stocks[:25]
             
             recommendations[timeframe] = {
                 'portfolio_allocation': portfolio['allocations'],
@@ -1447,7 +1447,7 @@ class PortfolioRecommender:
             report.append(f"\nDefensive Assets: {allocations['defensive']*100:.1f}%")
             
             # Top buys - sorted by highest gains first
-            report.append(f"\nTop 10 Stocks to Buy ({period}):")
+            report.append(f"\nTop 25 Stocks to Buy ({period}):")
             for i, stock in enumerate(data['top_buys'], 1):
                 report.append(
                     f"{i}. {stock['ticker']}: Expected Gain = {stock['expected_return']:+.1f}%"
@@ -1455,7 +1455,7 @@ class PortfolioRecommender:
                 )
             
             # Top sells - sorted by highest losses first
-            report.append(f"\nTop 10 Stocks to Sell ({period}):")
+            report.append(f"\nTop 25 Stocks to Sell ({period}):")
             for i, stock in enumerate(data['top_sells'], 1):
                 report.append(
                     f"{i}. {stock['ticker']}: Expected Return = {stock['expected_return']:+.1f}%"
@@ -1473,6 +1473,7 @@ def fetch_all_tickers():
     #top_etfs = ['SPY', 'QQQ', 'DIA', 'IWM', 'VTI', 'VEA', 'VWO', 'VTV', 'VUG', 'VOO']
     #commodity_etfs = ['GLD', 'SLV', 'USO', 'UNG', 'PPLT', 'PALL', 'WEAT', 'CORN', 'DBA', 'DBB', 'DBC', 'DBO', 'DBP']
     #sample_stocks = ['AAPL', 'TSLA', 'MSFT', 'AMZN', 'GOOGL', 'NVDA']
+    tst_stock = ['NSIT','MPWR','ACLS','OLED','CRUS','MCHP','FTNT','YOU','ADBE','ENPH','GFS','AKAM','SWKS','CDW','ICHR','ADI','EPAM','MSI','ROP']
     
     #all_needed_tickers  = islamic_us_etfs+commodity_etfs+top_tech
     ## Return all categories of tickers
@@ -1484,7 +1485,7 @@ def fetch_all_tickers():
     #commodities = ['SLV', 'GLD', 'USO', 'DBC', 'UNG']  # Core commodities
     
     # Return deduplicated list
-    return list(set(islamic_us_etfs + top_tech  ))
+    return list(set(islamic_us_etfs + top_tech +tst_stock ))
 
 def main():
     # Initialize API keys
